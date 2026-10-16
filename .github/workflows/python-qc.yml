@@ -1,0 +1,44 @@
+name: Python Data Pipeline QC
+
+on:
+  push:
+    paths:
+      - 'scripts/python/**'
+      - '.github/workflows/python-qc.yml'
+  pull_request:
+    paths:
+      - 'scripts/python/**'
+      - '.github/workflows/python-qc.yml'
+  workflow_dispatch:
+
+jobs:
+  python-lint:
+    name: Python Linting & Syntax Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: 'scripts/python/requirements.txt'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install flake8 black
+          pip install -r scripts/python/requirements.txt
+
+      - name: Code formatting check (black)
+        run: |
+          black --check scripts/python/
+
+      - name: Lint with flake8
+        run: |
+          # stop the build if there are Python syntax errors or undefined names
+          flake8 scripts/python/ --count --select=E9,F63,F7,F82 --show-source --statistics
+          # exit-zero treats all errors as warnings
+          flake8 scripts/python/ --count --exit-zero --max-complexity=10 --max-line-length=120 --statistics

@@ -1,0 +1,62 @@
+Bootstrap: docker
+From: intel/oneapi-hpckit:2026.1-devel-ubuntu22.04
+
+%labels
+    Author Oscar Mora (EcoTechLab, Pueblo West, Colorado)
+    Project JORO-HPC
+    Version 0.1.0
+    Description Simulador Mecanístico LPDM-ABM para Trichonephila clavata
+
+%help
+    Contenedor reproducible para compilar y ejecutar JORO-HPC.
+    Incluye:
+      - Intel oneAPI (icpx, DPC++/SYCL, oneMKL, OpenMP)
+      - Librerías científicas: NetCDF4, HDF5, libpqxx (PostgreSQL), GDAL, PROJ
+      - Python 3 con GeoPandas, SQLAlchemy, CDSAPI, xarray
+
+%environment
+    export LC_ALL=C.UTF-8
+    export LANG=C.UTF-8
+    . /opt/intel/oneapi/setvars.sh --force > /dev/null 2>&1
+    export PATH=/opt/intel/oneapi/compiler/latest/bin:$PATH
+    export LD_LIBRARY_PATH=/opt/intel/oneapi/compiler/latest/lib:$LD_LIBRARY_PATH
+
+%post
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        cmake \
+        pkg-config \
+        git \
+        libpq-dev \
+        libpqxx-dev \
+        libnetcdf-dev \
+        libnetcdff-dev \
+        libhdf5-dev \
+        libgdal-dev \
+        libproj-dev \
+        python3 \
+        python3-pip \
+        python3-dev \
+        ca-certificates
+
+    # Instalar dependencias de Python fijadas
+    pip3 install --no-cache-dir --upgrade pip
+    pip3 install --no-cache-dir \
+        geopandas \
+        sqlalchemy \
+        psycopg2-binary \
+        pygbif \
+        cdsapi \
+        xarray \
+        netcdf4 \
+        scikit-learn \
+        scipy
+
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+%runscript
+    echo "=========================================================="
+    echo "  JORO-HPC Container Environment (Intel oneAPI + SYCL)"
+    echo "=========================================================="
+    exec "$@"

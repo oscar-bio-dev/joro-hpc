@@ -1,0 +1,113 @@
+name: JORO-HPC CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ───────────────────────────────────────────────────────────────────────────
+  # Job 1: Build & Test con GCC y Clang (Estándar C++20 + OpenMP)
+  # ───────────────────────────────────────────────────────────────────────────
+  build-and-test-native:
+    name: Native Build (${{ matrix.compiler.cxx }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler:
+          - { cc: gcc-13, cxx: g++-13 }
+          - { cc: clang-17, cxx: clang++-17 }
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            cmake \
+            pkg-config \
+            libnetcdf-dev \
+            libpqxx-dev \
+            libomp-dev \
+            ${{ matrix.compiler.cc }} \
+            ${{ matrix.compiler.cxx }}
+
+      - name: Configure CMake
+        env:
+          CC: ${{ matrix.compiler.cc }}
+          CXX: ${{ matrix.compiler.cxx }}
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_STANDARD=20
+
+      - name: Build target binaries
+        run: |
+          cmake --build build -j$(nproc)
+
+      - name: Run CTest numerical suite
+        run: |
+          ctest --test-dir build --output-on-failure --verbose
+
+      - name: Run SIMD microbenchmark
+        run: |
+          ./build/bench_abm_simd
+
+      - name: Run coupled simulation executable
+        run: |
+          ./build/joro_hpc
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Job 2: Intel oneAPI DPC++ / SYCL (Compilador icpx + OpenMP + AVX-512)
+  # ───────────────────────────────────────────────────────────────────────────
+  build-and-test-oneapi:
+    name: Intel oneAPI (icpx + SYCL)
+    runs-on: ubuntu-latest
+    container:
+      image: intel/oneapi-hpckit:devel-ubuntu22.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install build tools and libraries
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update && apt-get install -y --no-install-recommends \
+            build-essential \
+            cmake \
+            pkg-config \
+            libnetcdf-dev \
+            libpqxx-dev \
+            git
+
+      - name: Configure and Build with icpx
+        shell: bash
+        run: |
+          . /opt/intel/oneapi/setvars.sh --force
+          cmake -B build \
+            -DCMAKE_CXX_COMPILER=icpx \
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j$(nproc)
+
+      - name: Run CTest verification in oneAPI environment
+        shell: bash
+        run: |
+          . /opt/intel/oneapi/setvars.sh --force
+          ctest --test-dir build --output-on-failure
+
+      - name: Run coupled simulation in oneAPI environment
+        shell: bash
+        run: |
+          . /opt/intel/oneapi/setvars.sh --force
+          ./build/joro_hpc

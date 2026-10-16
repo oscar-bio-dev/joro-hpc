@@ -1,0 +1,63 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# JORO-HPC  ·  .gitignore
+# ──────────────────────────────────────────────────────────────────────────────
+
+# ── Directorios de compilación y datos locales ───────────────────────────────
+build/
+data/
+
+# ── Binarios y objetos ───────────────────────────────────────────────────────
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+*.exe
+*.out
+joro_hpc
+
+# ── Datos científicos grandes (NetCDF, HDF5) ────────────────────────────────
+*.nc
+*.nc4
+*.h5
+*.hdf5
+*.hdf
+*.grib
+*.grib2
+
+# ── Rasters y GIS ────────────────────────────────────────────────────────────
+*.tif
+*.tiff
+*.geotiff
+*.shp
+*.shx
+*.dbf
+*.prj
+*.cpg
+
+# ── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+*.egg
+
+# ── Editores e IDEs ──────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# ── CMake cache ──────────────────────────────────────────────────────────────
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# ── Intel oneAPI temporales ──────────────────────────────────────────────────
+*.ipo
+*.optrpt
