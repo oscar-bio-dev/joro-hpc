@@ -12,7 +12,7 @@ namespace joro::lpdm {
 ///
 /// Parámetros:
 ///   mass_mg      : Masa del juvenil [mg] (típicamente 0.2 a 5.0 mg para estadios II-III)
-///   silk_len_m   : Longitud total del hilo de baloneo [m] (0.1 a 2.5 m)
+///   silk_len_m   : Longitud total del hilo de baloneo [m] (0.05 a 2.30 m)
 ///   posture_chi  : Factor aerodinámico de postura (0.5 = compacta, 1.0 = paracaídas extendido)
 ///   rho_air      : Densidad del aire en la altitud actual [kg/m^3]
 ///   mu_air       : Viscosidad dinámica del aire [Pa*s]

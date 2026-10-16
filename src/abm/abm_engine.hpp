@@ -9,9 +9,9 @@
 namespace joro::abm {
 
 struct DemographicParameters {
-    float fecundity_F = 800.0f;
+    float fecundity_F = 450.0f;    ///< Fecundidad por saco [huevos/saco] (Tabla 8.3: 400-500)
     float q10 = 2.2f;
-    float t_c = -4.0f;             ///< Temperatura crítica de daño por frío [°C]
+    float t_c = -3.5f;             ///< Temperatura crítica de daño por frío [°C] (Tabla 8.3: [-5, 0])
     float alpha_damage = 0.04f;    ///< Tasa de acumulación de daño
     int   beta_damage = 2;         ///< Exponente de estrés térmico
     float q_viab = 0.65f;          ///< Viabilidad de ootecas

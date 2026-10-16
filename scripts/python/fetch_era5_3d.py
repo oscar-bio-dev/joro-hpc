@@ -29,6 +29,23 @@ PRESSURE_VARIABLES = [
     "u_component_of_wind", "v_component_of_wind", "vertical_velocity", "temperature"
 ]
 
+HOURLY_STEPS = [f"{h:02d}:00" for h in range(24)]
+ALL_DAYS = [f"{d:02d}" for d in range(1, 32)]
+
+
+def get_cds_client():
+    """Inicializa el cliente de CDS API verificando configuración."""
+    try:
+        import cdsapi
+        return cdsapi.Client()
+    except ImportError:
+        logger.error("Librería 'cdsapi' no instalada. Ejecute: pip install cdsapi")
+        return None
+    except Exception as e:
+        logger.error("Error al inicializar cdsapi.Client: %s", e)
+        logger.info("Asegúrese de configurar el archivo ~/.cdsapirc con su URL y API Key de Copernicus CDS.")
+        return None
+
 
 def download_era5_season(
     output_dir: Path,
@@ -36,19 +53,72 @@ def download_era5_season(
     years: List[int],
     months: List[str] = ["05", "06", "07"],
 ) -> None:
-    """Descarga lotes anuales de ERA5 en formato NetCDF4 por año."""
+    """Descarga lotes de ERA5 en formato NetCDF4 para los meses de baloneo."""
     output_dir.mkdir(parents=True, exist_ok=True)
     lon_min, lat_min, lon_max, lat_max = bbox
     # CDS API area format: [North, West, South, East]
     area = [lat_max, lon_min, lat_min, lon_max]
 
-    logger.info("Directorio destino de NetCDF4: %s", output_dir)
+    logger.info("Iniciando descarga ERA5 hacia: %s", output_dir)
     logger.info("Área CDS [N, W, S, E]: %s", area)
-    logger.info("Años solicitados: %s", years)
+    logger.info("Años solicitados: %s | Meses: %s", years, months)
 
-    # TODO (Mes 1): Invocar cliente cdsapi.Client()
-    # Para cada año y mes:
-    # 1. Solicitar reanalysis-era5-pressure-levels en NetCDF
-    # 2. Solicitar reanalysis-era5-single-levels en NetCDF
-    # 3. Guardar como era5_uvwt_YYYY_MM.nc y era5_sfc_YYYY_MM.nc
-    logger.info("Esqueleto de fetch_era5_3d listo para ejecución con credenciales CDS.")
+    client = get_cds_client()
+    if client is None:
+        logger.warning("Operando en modo demostración/dry-run. Cree ~/.cdsapirc para habilitar descargas reales.")
+        return
+
+    for year in years:
+        for month in months:
+            # 1. Descarga de tensores 3D en niveles de presión
+            target_3d = output_dir / f"era5_uvwt_{year}_{month}.nc"
+            if target_3d.exists():
+                logger.info("Archivo existente, omitiendo: %s", target_3d.name)
+            else:
+                logger.info("Solicitando campos 3D: %s...", target_3d.name)
+                try:
+                    client.retrieve(
+                        "reanalysis-era5-pressure-levels",
+                        {
+                            "product_type": "reanalysis",
+                            "format": "netcdf",
+                            "variable": PRESSURE_VARIABLES,
+                            "pressure_level": SELECTED_PRESSURE_LEVELS,
+                            "year": str(year),
+                            "month": month,
+                            "day": ALL_DAYS,
+                            "time": HOURLY_STEPS,
+                            "area": area,
+                        },
+                        str(target_3d),
+                    )
+                    logger.info("Descargado con éxito: %s", target_3d.name)
+                except Exception as e:
+                    logger.error("Fallo al descargar campos 3D (%d-%s): %s", year, month, e)
+
+            # 2. Descarga de variables superficiales
+            target_sfc = output_dir / f"era5_sfc_{year}_{month}.nc"
+            if target_sfc.exists():
+                logger.info("Archivo existente, omitiendo: %s", target_sfc.name)
+            else:
+                logger.info("Solicitando variables superficiales: %s...", target_sfc.name)
+                try:
+                    client.retrieve(
+                        "reanalysis-era5-single-levels",
+                        {
+                            "product_type": "reanalysis",
+                            "format": "netcdf",
+                            "variable": SURFACE_VARIABLES,
+                            "year": str(year),
+                            "month": month,
+                            "day": ALL_DAYS,
+                            "time": HOURLY_STEPS,
+                            "area": area,
+                        },
+                        str(target_sfc),
+                    )
+                    logger.info("Descargado con éxito: %s", target_sfc.name)
+                except Exception as e:
+                    logger.error("Fallo al descargar variables superficiales (%d-%s): %s", year, month, e)
+
+    logger.info("Proceso de descarga ERA5 completado.")

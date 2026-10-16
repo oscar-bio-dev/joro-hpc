@@ -1,6 +1,6 @@
 # ==============================================================================
 # JORO-HPC — Intervalos de Exploración y Pesos de Calibración
-# Según Secciones 8.3, 11 y 13.2 de JORO-HPC.tex
+# Sincronizado estrictamente con Secciones 7.3, 8.3, 11 y 13.2 de JORO-HPC.tex
 # NOTA: Los rangos definen cotas de búsqueda física, no distribuciones posteriores.
 # ==============================================================================
 
@@ -17,36 +17,40 @@ max_evaluations = 5000
 timeout_seconds = 300
 
 [abm_priors]
-# Fecundidad: número de huevos por saco
+# Fecundidad: número de huevos por saco (Tabla 8.3 de JORO-HPC.tex: 400–500 huevos/saco)
 fecundity_min = 400.0
-fecundity_max = 1500.0
-fecundity_default = 800.0
+fecundity_max = 500.0
+fecundity_default = 450.0
 
-# Coeficiente Q10 de aceleración metabólica por estadio
+# Producción anual por hembra (considerando 1 a 3 sacos anuales en condiciones óptimas)
+fecundity_annual_max = 1500.0
+
+# Coeficiente Q10 de aceleración metabólica por estadio (Tabla 8.3: 2.0–3.0)
 q10_min = 2.0
 q10_max = 3.0
 q10_default = 2.2
 
-# Temperatura crítica de daño por frío T_c,s [°C]
-t_c_min = -8.0
+# Temperatura crítica de daño por frío T_c,s [°C] (Tabla 8.3: [-5.0, 0.0] °C)
+t_c_min = -5.0
 t_c_max =  0.0
-t_c_default = -4.0
+t_c_default = -3.5
+t_c_extreme_cold = -8.0  # Límite inferior para exploración de sensibilidad térmica extrema
 
-# Tasa de daño por frío alpha_s [días^-1 °C^-beta]
+# Tasa de daño por frío alpha_s [días^-1 °C^-beta] (Tabla 8.3: [0.01, 0.10])
 alpha_damage_min = 0.01
 alpha_damage_max = 0.10
 alpha_damage_default = 0.04
 
-# Exponente no lineal beta_s (modelos discretos)
+# Exponente no lineal beta_s (modelos discretos: {1, 2, 3})
 beta_damage_candidates = [1, 2, 3]
 beta_damage_default = 2
 
-# Viabilidad de ootecas q_viab
+# Viabilidad de ootecas q_viab (Tabla 8.3: [0.20, 0.90])
 q_viab_min = 0.20
 q_viab_max = 0.90
 q_viab_default = 0.65
 
-# Fracción de juveniles que inician baloneo q_balloon
+# Fracción de juveniles que inician baloneo q_balloon (Tabla 8.3: [0.10, 0.60])
 q_balloon_min = 0.10
 q_balloon_max = 0.60
 q_balloon_default = 0.35
@@ -64,11 +68,11 @@ eta2_sconv = 0.60     # Sensibilidad a la velocidad convectiva [s/m]
 eta3_temp = 0.20      # Término térmico
 eta4_fen = 1.00       # Ventana fenológica diurna
 
-# Parámetros de sedimentación aerodinámica
+# Parámetros de sedimentación aerodinámica (Sección 7.3: M < 100 mg, L_s en [0.05, 2.30] m)
 spider_mass_mg_min = 0.2
 spider_mass_mg_max = 25.0
-silk_length_m_min = 0.10
-silk_length_m_max = 2.00
+silk_length_m_min = 0.05
+silk_length_m_max = 2.30
 
 # Coeficiente de postura chi: 0.5 (compacta) a 1.0 (paracaídas extendido)
 posture_chi_min = 0.5

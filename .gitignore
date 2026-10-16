@@ -61,3 +61,8 @@ Makefile
 # ── Intel oneAPI temporales ──────────────────────────────────────────────────
 *.ipo
 *.optrpt
+
+# ── Archivos comprimidos de respaldo ─────────────────────────────────────────
+*.zip
+*.tar.gz
+*.tar.bz2

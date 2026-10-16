@@ -1,6 +1,6 @@
 <div align="center">
 
-# JORO-HPC 🕷️💨
+# JORO-HPC 🕷️
 
 ### Multiscale Mechanistic Simulator for *Trichonephila clavata* Invasions: 3D Lagrangian Atmospheric Dispersion (LPDM) Coupled with Agent-Based Demographics (ABM)
 
@@ -96,7 +96,7 @@ $$a_w = -\frac{w'}{\tau_L} + \frac{1}{2}\frac{\partial \sigma_w^2}{\partial z} +
 $$\begin{aligned}
 v_{s,j} &= \frac{M_j \cdot g}{C_{\rm drag}^{\rm silk}(L_{s,j}, d_{\rm silk}, \mu_a) + C_{\rm drag}^{\rm body}(M_j, \chi_j, \mu_a)}
 \end{aligned}$$
-where $\chi \in [0.5, 1.0]$ is the posture coefficient (0.5 for compact freefall, 1.0 for fully spread-eagled parachuting), $M \in [0.2, 25.0]\text{ mg}$, and $L_s \in [0.10, 2.50]\text{ m}$.
+where $\chi \in [0.5, 1.0]$ is the posture coefficient (0.5 for compact freefall, 1.0 for fully spread-eagled parachuting), $M \in [0.2, 25.0]\text{ mg}$, and $L_s \in [0.05, 2.30]\text{ m}$.
 
 ### 3. Winter Chill Injury Accumulation
 Instead of an unrealistic static temperature threshold, overwintering egg sac mortality follows cumulative thermal stress:
@@ -245,6 +245,20 @@ apptainer run --nv --bind /data:/data joro_hpc.sif ./build/joro_hpc
 * **Success Criteria:** Brier Score, calibration slope/intercept, front advance velocity, and directional displacement accuracy against two parsimonious null models:
   1. Static Bioclimatic SDM (MaxEnt / Generalized Additive Model).
   2. Isotropic Exponential Kernel: $K_0(d \mid \lambda) = \lambda^{-1} e^{-d/\lambda}$.
+
+---
+
+## 📦 Clean Source Packaging
+
+To create clean release or submission `.zip` archives without local build binaries, datasets, or `.git` internal metadata:
+
+```bash
+# Using Git native archive
+git archive --format=zip --output=joro-hpc-clean.zip HEAD
+
+# Or using the included packaging script
+./scripts/package_clean_zip.sh
+```
 
 ---
 
