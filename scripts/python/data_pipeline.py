@@ -18,8 +18,7 @@ import argparse
 import logging
 import sys
 from pathlib import Path
-from sqlalchemy import create_engine
-from sqlalchemy.engine import Engine
+from typing import Any
 
 # Constantes sincronizadas con Sección 6 y 13 de JORO-HPC.tex
 STUDY_BBOX = (-95.0, 25.0, -70.0, 45.0)  # (lon_min, lat_min, lon_max, lat_max)
@@ -35,9 +34,14 @@ logging.basicConfig(
 logger = logging.getLogger("joro.pipeline")
 
 
-def get_db_engine(db_url: str) -> Engine:
+def get_db_engine(db_url: str) -> Any:
     """Retorna el motor SQLAlchemy conectado a PostgreSQL."""
-    return create_engine(db_url, pool_size=5, pool_pre_ping=True)
+    try:
+        from sqlalchemy import create_engine
+        return create_engine(db_url, pool_size=5, pool_pre_ping=True)
+    except ImportError:
+        logger.error("Librería 'sqlalchemy' no instalada en este entorno.")
+        return None
 
 
 def run_gbif_pipeline(db_url: str, limit: int = 100_000) -> None:

@@ -23,13 +23,13 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 
 # Soporte para lectura TOML nativa (Python 3.11+) o tomli (<3.11)
-try:
+if sys.version_info >= (3, 11):
     import tomllib
-except ImportError:
+else:
     try:
-        import tomli as tomllib
+        import tomli as tomllib  # type: ignore[no-redef]
     except ImportError:
-        tomllib = None  # type: ignore
+        tomllib = None  # type: ignore[assignment]
 
 logging.basicConfig(
     level=logging.INFO,
