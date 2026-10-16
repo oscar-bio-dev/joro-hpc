@@ -1,6 +1,7 @@
 # ==============================================================================
 # JORO-HPC — Configuración Maestra del MVP (Sección 6 y 13.2 de JORO-HPC.tex)
 # Simulador Mecanístico LPDM-ABM para Trichonephila clavata
+# Arquitectura Actualizada: Data Lake Permanente + Scratch NVMe + PostgreSQL (Port 5433)
 # ==============================================================================
 
 [project]
@@ -8,6 +9,11 @@ name = "JORO-HPC"
 version = "0.1.0"
 seed = 42819              # Semilla RNG principal para reproducibilidad
 log_level = "INFO"
+
+[storage]
+# Infraestructura de almacenamiento HPC (Data Lake vs Scratch)
+datalake_root = "/mnt/ecotech_datalake"
+scratch_root = "/mnt/hpc_scratch/joro-hpc"
 
 [domain]
 # Dominio espacial del MVP: Este de Estados Unidos (Sección 6)
@@ -31,8 +37,8 @@ ballooning_end_month   = 7   # Julio
 ballooning_days        = 92  # Días por año para el LPDM
 
 [atmosphere]
-# Tensores ERA5 en NetCDF4 (Sección 13.1)
-data_dir = "data/era5_nc"
+# Tensores ERA5 en NetCDF4 montados en scratch NVMe de alta velocidad
+data_dir = "/mnt/hpc_scratch/joro-hpc/era5_nc_active"
 time_step_s = 60.0        # dt para integración de Euler-Maruyama en LPDM [s]
 era5_time_step_h = 1.0    # Resolución temporal de los archivos ERA5 [h]
 
@@ -59,11 +65,13 @@ simd_vector_width = 16    # 16 floats FP32 en registros AVX-512 (512 bits)
 cohort_compression = true # Modo super-individuos / cohortes ponderadas
 
 [database]
-# Conexión a PostgreSQL / PostGIS
+# Conexión a PostgreSQL / PostGIS (migrado a puerto 5433 para evitar colisiones Docker)
 host = "localhost"
-port = 5432
+port = 5433
 dbname = "joro_db"
 user = "joro_admin"
+password = "joro_db_password"
+tablespace = "hpc_fast"
 table_grid = "grid_5km"
 table_observations = "cell_annual_observations"
 table_raw_occurrences = "occurrences_raw"

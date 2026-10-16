@@ -11,6 +11,10 @@ struct SimulationConfig {
     std::string version = "0.1.0";
     uint32_t seed = 42819;
     
+    // Almacenamiento HPC
+    std::string datalake_root = "/mnt/ecotech_datalake";
+    std::string scratch_root = "/mnt/hpc_scratch/joro-hpc";
+    
     BoundingBox bbox;
     double cell_size_m = 5000.0;
     
@@ -22,13 +26,16 @@ struct SimulationConfig {
     int ballooning_start_month = 5;
     int ballooning_end_month   = 7;
     
-    std::string era5_dir = "data/era5_nc";
+    std::string era5_dir = "/mnt/hpc_scratch/joro-hpc/era5_nc_active";
     double lpdm_dt_seconds = 60.0;
     
+    // PostgreSQL / PostGIS (puerto 5433 para evitar colisiones Docker)
     std::string db_host = "localhost";
-    int db_port = 5432;
+    int db_port = 5433;
     std::string db_name = "joro_db";
     std::string db_user = "joro_admin";
+    std::string db_password = "joro_db_password";
+    std::string db_tablespace = "hpc_fast";
     
     // Parámetros de calibración por defecto
     double w1_llegada = 0.333333;

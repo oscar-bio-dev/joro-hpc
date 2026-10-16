@@ -66,8 +66,8 @@ def main() -> int:
     parser.add_argument(
         "--db-url",
         type=str,
-        default="postgresql://joro_admin:secret@localhost:5432/joro_db",
-        help="URI de conexión a PostgreSQL",
+        default="postgresql://joro_admin:joro_db_password@localhost:5433/joro_db",
+        help="URI de conexión a PostgreSQL (default: %(default)s)",
     )
     parser.add_argument(
         "--action",
