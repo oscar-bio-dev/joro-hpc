@@ -7,8 +7,8 @@
 
 namespace joro::io {
 
-PostgisClient::PostgisClient(std::string host, int port, std::string dbname, std::string user)
-    : host_(std::move(host)), port_(port), dbname_(std::move(dbname)), user_(std::move(user)) {}
+PostgisClient::PostgisClient(std::string host, int port, std::string dbname, std::string user, std::string password)
+    : host_(std::move(host)), port_(port), dbname_(std::move(dbname)), user_(std::move(user)), password_(std::move(password)) {}
 
 PostgisClient::~PostgisClient() = default;
 
@@ -17,6 +17,9 @@ bool PostgisClient::connect() {
     try {
         std::string conn_str = "host=" + host_ + " port=" + std::to_string(port_) +
                                " dbname=" + dbname_ + " user=" + user_;
+        if (!password_.empty()) {
+            conn_str += " password=" + password_;
+        }
         pqxx::connection conn(conn_str);
         is_connected_ = conn.is_open();
         return is_connected_;

@@ -6,7 +6,8 @@
 --   - PostgreSQL ≥ 14 con extensión PostGIS ≥ 3.3
 --
 -- Uso:
---   psql -U joro_admin -d joro_db -f scripts/sql/01_schema_postgis.sql
+--   psql -h localhost -p 5433 -U joro_admin -d joro_db -f scripts/sql/01_schema_postgis.sql
+--   (Tablespace de alto rendimiento: hpc_fast)
 --------------------------------------------------------------------------------
 
 -- ─────────────────────────────────────────────────────────────────────────────

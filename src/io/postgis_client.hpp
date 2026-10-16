@@ -9,7 +9,7 @@ namespace joro::io {
 
 class PostgisClient {
 public:
-    PostgisClient(std::string host, int port, std::string dbname, std::string user);
+    PostgisClient(std::string host, int port, std::string dbname, std::string user, std::string password = "");
     ~PostgisClient();
 
     /// Conecta con la base de datos PostgreSQL
@@ -31,6 +31,7 @@ private:
     int port_;
     std::string dbname_;
     std::string user_;
+    std::string password_;
     bool is_connected_ = false;
 };
 

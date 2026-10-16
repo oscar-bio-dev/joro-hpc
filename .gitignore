@@ -4,6 +4,7 @@
 
 # ── Directorios de compilación y datos locales ───────────────────────────────
 build/
+data
 data/
 
 # ── Binarios y objetos ───────────────────────────────────────────────────────

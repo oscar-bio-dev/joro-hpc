@@ -34,12 +34,15 @@ int main(int argc, char* argv[]) {
     std::cout << "[Config] Dominio MVP: [" << config.bbox.lon_min << ", " << config.bbox.lat_min
               << "] a [" << config.bbox.lon_max << ", " << config.bbox.lat_max << "]\n"
               << "[Config] Ventana de Calibración: " << config.calib_start_year << "–" << config.calib_end_year << "\n"
-              << "[Config] Ventana de Evaluación:  " << config.eval_start_year  << "–" << config.eval_end_year << "\n\n";
+              << "[Config] Ventana de Evaluación:  " << config.eval_start_year  << "–" << config.eval_end_year << "\n"
+              << "[Config] Storage: Data Lake = " << config.datalake_root << " | Scratch = " << config.scratch_root << "\n"
+              << "[Config] DB: " << config.db_host << ":" << config.db_port << "/" << config.db_name
+              << " (tablespace: " << config.db_tablespace << ")\n\n";
 
     auto start_time = std::chrono::high_resolution_clock::now();
 
     // 2. Conectar a PostGIS y cargar la malla de 5 km x 5 km
-    joro::io::PostgisClient db_client(config.db_host, config.db_port, config.db_name, config.db_user);
+    joro::io::PostgisClient db_client(config.db_host, config.db_port, config.db_name, config.db_user, config.db_password);
     db_client.connect();
 
     std::vector<joro::GridCell> grid_cells;
