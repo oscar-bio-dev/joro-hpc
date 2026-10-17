@@ -25,18 +25,22 @@ public:
             if (it != propagules_per_cell.end() && it->second > 0) {
                 uint32_t total_props = it->second;
                 uint32_t n_sim = std::min(total_props, MAX_PARTICLES_PER_CELL);
-                float weight_per_p = static_cast<float>(total_props) / static_cast<float>(n_sim);
+                uint32_t base_weight = total_props / n_sim;
+                uint32_t remainder = total_props % n_sim;
 
                 for (uint32_t i = 0; i < n_sim; ++i) {
                     Particle3D p;
                     p.x = cell.centroid_lon;
                     p.y = cell.centroid_lat;
+                    p.origin_x = cell.centroid_lon;
+                    p.origin_y = cell.centroid_lat;
                     p.z = 5.0f;
                     p.w_prime = 0.0f;
                     p.mass_mg = 1.2f;
                     p.silk_length_m = 0.8f;
                     p.posture_chi = 0.85f;
-                    p.weight = weight_per_p;
+                    // Partición entera exacta: suma total de pesos en la celda == total_props
+                    p.weight = static_cast<float>(base_weight + (i < remainder ? 1 : 0));
                     p.origin_cell = cell.cell_id;
                     p.is_active = true;
                     particles_.push_back(p);
@@ -63,28 +67,55 @@ public:
             } catch (...) {
                 dev = sycl::device(sycl::default_selector_v);
             }
-            sycl::queue q(dev);
+            static bool printed_device_info = false;
+            if (!printed_device_info) {
+                std::cout << "  [SYCL Accelerator] Dispositivo activo: "
+                          << dev.get_info<sycl::info::device::name>()
+                          << " | Driver: " << dev.get_info<sycl::info::device::driver_version>()
+                          << " (" << (dev.is_gpu() ? "GPU Level-Zero" : "Host") << ")\n";
+                printed_device_info = true;
+            }
+            sycl::queue q(dev, sycl::property::queue::in_order{});
             const size_t n_particles = particles_.size();
 
+            // Alinear al tamaño de work-group en GPU (ej. 64) mediante dummy padding inactivo
+            constexpr size_t WG_SIZE = 64;
+            const size_t padded_size = ((n_particles + WG_SIZE - 1) / WG_SIZE) * WG_SIZE;
+
+            std::vector<Particle3D> host_buffer = particles_;
+            if (padded_size > n_particles) {
+                host_buffer.resize(padded_size);
+                for (size_t i = n_particles; i < padded_size; ++i) {
+                    host_buffer[i].weight = 0.0f;
+                    host_buffer[i].is_active = false;
+                    host_buffer[i].origin_cell = 0;
+                }
+            }
+
             // Asignación de memoria en el dispositivo (Device USM)
-            Particle3D* d_particles = sycl::malloc_device<Particle3D>(n_particles, q);
-            q.memcpy(d_particles, particles_.data(), n_particles * sizeof(Particle3D)).wait();
+            Particle3D* d_particles = sycl::malloc_device<Particle3D>(padded_size, q);
+            q.memcpy(d_particles, host_buffer.data(), padded_size * sizeof(Particle3D)).wait();
 
             const float sqrt_dt = std::sqrt(dt_seconds);
+            constexpr float deg_to_rad = 3.14159265f / 180.0f;
+            constexpr float rad_to_deg = 180.0f / 3.14159265f;
+            constexpr float R_earth = 6371000.0f;
 
             q.submit([&](sycl::handler& cgh) {
-                cgh.parallel_for(sycl::range<1>(n_particles), [=](sycl::id<1> idx) {
-                    Particle3D& p = d_particles[idx];
-                    if (!p.is_active) return;
+                cgh.parallel_for(sycl::nd_range<1>(padded_size, WG_SIZE), [=](sycl::nd_item<1> item) {
+                    size_t idx = item.get_global_id(0);
+                    if (idx >= n_particles) return;
 
-                    float meters_lat = 111320.0f;
+                    Particle3D& p = d_particles[idx];
+                    if (!p.is_active || p.weight <= 0.0f) return;
+
                     float u_wind = 4.0f;
                     float v_wind = 1.5f;
                     float w_mean = 0.02f;
                     float v_s = 0.35f;
 
                     // Estado LCG por partícula
-                    uint32_t lcg_state = static_cast<uint32_t>(idx[0] * 1664525u + 42819u);
+                    uint32_t lcg_state = static_cast<uint32_t>(idx * 1664525u + 42819u);
 
                     for (int s = 0; s < total_steps; ++s) {
                         // Generador pseudoaleatorio uniforme en GPU
@@ -105,10 +136,15 @@ public:
                         float b_w = sycl::sqrt(2.0f * sigma_w * sigma_w / tau_L);
                         p.w_prime += a_w * dt_seconds + b_w * dW;
 
-                        // Advección espacial Euler-Maruyama 3D
-                        float meters_lon = meters_lat * sycl::cos(p.y * 3.14159265f / 180.0f);
-                        p.x += (u_wind * dt_seconds) / meters_lon;
-                        p.y += (v_wind * dt_seconds) / meters_lat;
+                        // Cinemática esférica exacta:
+                        // dLon = (U * dt / (R_earth * cos(lat))) * (180 / pi)
+                        // dLat = (V * dt / R_earth) * (180 / pi)
+                        float cos_lat = sycl::max(0.01f, sycl::cos(p.y * deg_to_rad));
+                        float d_lon = (u_wind * dt_seconds / (R_earth * cos_lat)) * rad_to_deg;
+                        float d_lat = (v_wind * dt_seconds / R_earth) * rad_to_deg;
+
+                        p.x += d_lon;
+                        p.y += d_lat;
                         p.z += (w_mean + p.w_prime - v_s) * dt_seconds;
 
                         if (p.z <= 0.0f) {
@@ -133,11 +169,14 @@ public:
 
         if (!offload_succeeded) {
             const float sqrt_dt = std::sqrt(dt_seconds);
+            constexpr float deg_to_rad = 3.14159265f / 180.0f;
+            constexpr float rad_to_deg = 180.0f / 3.14159265f;
+            constexpr float R_earth = 6371000.0f;
+
             for (size_t i = 0; i < particles_.size(); ++i) {
                 auto& p = particles_[i];
-                if (!p.is_active) continue;
+                if (!p.is_active || p.weight <= 0.0f) continue;
 
-                float meters_lat = 111320.0f;
                 float u_wind = 4.0f;
                 float v_wind = 1.5f;
                 float w_mean = 0.02f;
@@ -161,9 +200,12 @@ public:
                     float b_w = std::sqrt(2.0f * sigma_w * sigma_w / tau_L);
                     p.w_prime += a_w * dt_seconds + b_w * dW;
 
-                    float meters_lon = meters_lat * std::cos(p.y * 3.14159265f / 180.0f);
-                    p.x += (u_wind * dt_seconds) / meters_lon;
-                    p.y += (v_wind * dt_seconds) / meters_lat;
+                    float cos_lat = std::max(0.01f, std::cos(p.y * deg_to_rad));
+                    float d_lon = (u_wind * dt_seconds / (R_earth * cos_lat)) * rad_to_deg;
+                    float d_lat = (v_wind * dt_seconds / R_earth) * rad_to_deg;
+
+                    p.x += d_lon;
+                    p.y += d_lat;
                     p.z += (w_mean + p.w_prime - v_s) * dt_seconds;
 
                     if (p.z <= 0.0f) {
@@ -176,12 +218,24 @@ public:
         }
 
         // Reducción espacial: acreditar aterrizaje en la celda geográfica de destino real
+        constexpr double deg_to_rad_red = 3.141592653589793 / 180.0;
+        constexpr double R_earth_red = 6371000.0;
+        std::vector<float> landed_distances_km;
+
         for (const auto& p : particles_) {
+            if (p.weight <= 0.0f) continue; // Descartar dummy padding
             uint32_t w = static_cast<uint32_t>(std::round(p.weight));
             result.total_released += w;
 
+            // Distancia de salto respecto a la celda de origen
+            double mid_lat = 0.5 * (p.origin_y + p.y) * deg_to_rad_red;
+            double dx_m = (p.x - p.origin_x) * deg_to_rad_red * R_earth_red * std::cos(mid_lat);
+            double dy_m = (p.y - p.origin_y) * deg_to_rad_red * R_earth_red;
+            float dist_km = static_cast<float>(std::sqrt(dx_m * dx_m + dy_m * dy_m) / 1000.0);
+
             if (!p.is_active) {
                 result.total_landed += w;
+                landed_distances_km.push_back(dist_km);
 
                 int32_t dest_cell_id = -1;
                 double min_dist_sq = 1e9;
@@ -204,6 +258,16 @@ public:
             } else {
                 result.total_escaped += w;
             }
+        }
+
+        if (!landed_distances_km.empty()) {
+            std::sort(landed_distances_km.begin(), landed_distances_km.end());
+            double sum_d = 0.0;
+            for (float d : landed_distances_km) sum_d += d;
+            result.mean_jump_distance_km = static_cast<float>(sum_d / landed_distances_km.size());
+            size_t p95_idx = static_cast<size_t>(landed_distances_km.size() * 0.95);
+            if (p95_idx >= landed_distances_km.size()) p95_idx = landed_distances_km.size() - 1;
+            result.p95_jump_distance_km = landed_distances_km[p95_idx];
         }
 
         return result;

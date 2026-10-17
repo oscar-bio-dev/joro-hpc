@@ -74,6 +74,20 @@ bool Era5NetCdfReader::load_month(int year, int month, AtmosphericField3D& field
             if (varid_w >= 0) nc_get_var_float(ncid_3d, varid_w, field.w.data());
             if (varid_t >= 0) nc_get_var_float(ncid_3d, varid_t, field.t.data());
 
+            // Conversión hidrostática explícita: omega (Pa/s) -> velocidad geométrica vertical w (m/s)
+            // w = - (omega * R_d * T) / (p * g)
+            for (int t_idx = 0; t_idx < field.n_times; ++t_idx) {
+                for (int l_idx = 0; l_idx < field.n_levels; ++l_idx) {
+                    float p_pa = field.pressure_levels_hpa[l_idx] * 100.0f;
+                    for (int lat_idx = 0; lat_idx < field.n_lats; ++lat_idx) {
+                        for (int lon_idx = 0; lon_idx < field.n_lons; ++lon_idx) {
+                            size_t idx = ((static_cast<size_t>(t_idx) * field.n_levels + l_idx) * field.n_lats + lat_idx) * field.n_lons + lon_idx;
+                            field.w[idx] = omega_to_w(field.w[idx], p_pa, field.t[idx]);
+                        }
+                    }
+                }
+            }
+
             nc_close(ncid_3d);
 
             // Leer variables superficiales si existen
@@ -85,17 +99,26 @@ bool Era5NetCdfReader::load_month(int year, int month, AtmosphericField3D& field
                 field.u10.resize(sfc_elements);
                 field.v10.resize(sfc_elements);
                 field.sp.resize(sfc_elements);
+                field.t2m.resize(sfc_elements);
                 field.blh.resize(sfc_elements);
 
-                int varid_u10 = -1, varid_v10 = -1, varid_sp = -1, varid_blh = -1;
+                int varid_u10 = -1, varid_v10 = -1, varid_sp = -1, varid_t2m = -1, varid_blh = -1;
                 nc_inq_varid(ncid_sfc, "u10", &varid_u10);
                 nc_inq_varid(ncid_sfc, "v10", &varid_v10);
                 nc_inq_varid(ncid_sfc, "sp", &varid_sp);
+                nc_inq_varid(ncid_sfc, "t2m", &varid_t2m);
                 nc_inq_varid(ncid_sfc, "blh", &varid_blh);
 
                 if (varid_u10 >= 0) nc_get_var_float(ncid_sfc, varid_u10, field.u10.data());
                 if (varid_v10 >= 0) nc_get_var_float(ncid_sfc, varid_v10, field.v10.data());
                 if (varid_sp >= 0) nc_get_var_float(ncid_sfc, varid_sp, field.sp.data());
+                if (varid_t2m >= 0) {
+                    nc_get_var_float(ncid_sfc, varid_t2m, field.t2m.data());
+                    // Conversión Kelvin -> Celsius [°C]
+                    for (size_t i = 0; i < sfc_elements; ++i) {
+                        field.t2m[i] -= 273.15f;
+                    }
+                }
                 if (varid_blh >= 0) nc_get_var_float(ncid_sfc, varid_blh, field.blh.data());
 
                 nc_close(ncid_sfc);
@@ -127,6 +150,7 @@ bool Era5NetCdfReader::load_month(int year, int month, AtmosphericField3D& field
     field.u10.assign(sfc_elements, 3.5f);
     field.v10.assign(sfc_elements, 1.5f);
     field.sp.assign(sfc_elements, 101325.0f);
+    field.t2m.assign(sfc_elements, 22.0f);   // 22 °C promedio estival
     field.blh.assign(sfc_elements, 1200.0f);
     return true;
 }

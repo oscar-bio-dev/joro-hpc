@@ -3,30 +3,29 @@
 JORO-HPC  ·  scripts/python/fetch_era5_3d.py
 Descarga quirúrgica de tensores horarios de ERA5 vía CDS API.
 
-Hito Fase 1 (Smoke Test):
-  - Descarga exclusiva de 24h: 1 de mayo de 2014 (00:00 a 23:00 UTC).
+Fase 2 (Piloto Aéreo de 7 Días):
+  - Descarga de 168 horas: 1 al 7 de mayo de 2014 (00:00 a 23:00 UTC).
   - Variables 3D (12 niveles 1000-700 hPa): u, v, w (omega), T.
   - Variables superficiales: sp, t2m, u10, v10, blh.
   - Destino: /mnt/hpc_scratch/joro-hpc/era5_nc_active/
 
 Uso:
-  python3 scripts/python/fetch_era5_3d.py
+  python3 scripts/python/fetch_era5_3d.py --week1 --force
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
-import os
 from pathlib import Path
-from typing import Tuple
+from typing import List, Tuple
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
 )
 logger = logging.getLogger("joro.era5")
 
-# 12 niveles de presión estándar para la capa límite atmosférica y troposfera baja (hPa)
+# 12 niveles de presión estándar para la capa límite y troposfera baja (hPa)
 SELECTED_PRESSURE_LEVELS = [
     "1000",
     "975",
@@ -42,28 +41,28 @@ SELECTED_PRESSURE_LEVELS = [
     "700",
 ]
 
-# Variables 3D de dinámica y termodinámica atmosférica
+# Dinámica 3D
 PRESSURE_VARIABLES = [
-    "u_component_of_wind",  # u [m/s]
-    "v_component_of_wind",  # v [m/s]
-    "vertical_velocity",  # omega [Pa/s]
-    "temperature",  # T [K]
+    "u_component_of_wind",
+    "v_component_of_wind",
+    "vertical_velocity",
+    "temperature",
 ]
 
-# 5 variables superficiales requeridas para el modelo LPDM y acoplamiento biofísico
+# 5 Variables superficiales
 SURFACE_VARIABLES = [
-    "surface_pressure",  # sp [Pa]
-    "2m_temperature",  # t2m [K]
-    "10m_u_component_of_wind",  # u10 [m/s]
-    "10m_v_component_of_wind",  # v10 [m/s]
-    "boundary_layer_height",  # blh [m]
+    "surface_pressure",
+    "2m_temperature",
+    "10m_u_component_of_wind",
+    "10m_v_component_of_wind",
+    "boundary_layer_height",
 ]
 
 HOURLY_STEPS = [f"{h:02d}:00" for h in range(24)]
 
 
 def get_cds_client():
-    """Inicializa el cliente de CDS API verificando credenciales."""
+    """Inicializa cliente cdsapi verificando credenciales."""
     try:
         import cdsapi
 
@@ -85,17 +84,27 @@ def get_cds_client():
 
 
 def _download_3d(
-    client, output_dir: Path, year: str, month: str, day: str, area: list
+    client,
+    output_dir: Path,
+    year: str,
+    month: str,
+    days: List[str],
+    area: list,
+    force: bool = False,
 ) -> bool:
     """Descarga variables 3D en niveles isobáricos."""
     target_3d = output_dir / f"era5_uvwt_{year}_{month}.nc"
-    target_3d_daily = output_dir / f"era5_uvwt_{year}_{month}_{day}.nc"
 
-    if target_3d.exists():
-        logger.info("Archivo 3D existente detectado: %s (Omitiendo)", target_3d.name)
+    if target_3d.exists() and not force:
+        logger.info(
+            "Archivo 3D existente detectado: %s (Omitiendo. Use --force para re-descargar)",
+            target_3d.name,
+        )
         return True
 
-    logger.info("Enviando petición CDS: Tensores 3D (u, v, omega, T)...")
+    logger.info(
+        "Enviando petición CDS: Tensores 3D (u, v, omega, T) para días %s...", days
+    )
     try:
         client.retrieve(
             "reanalysis-era5-pressure-levels",
@@ -106,18 +115,13 @@ def _download_3d(
                 "pressure_level": SELECTED_PRESSURE_LEVELS,
                 "year": year,
                 "month": month,
-                "day": [day],
+                "day": days,
                 "time": HOURLY_STEPS,
                 "area": area,
             },
             str(target_3d),
         )
         logger.info("✔ Descarga 3D completada con éxito: %s", target_3d.name)
-        if not target_3d_daily.exists():
-            try:
-                os.link(target_3d, target_3d_daily)
-            except OSError:
-                pass
         return True
     except Exception as e:
         logger.error("Error durante la descarga de tensores 3D: %s", e)
@@ -125,15 +129,21 @@ def _download_3d(
 
 
 def _download_sfc(
-    client, output_dir: Path, year: str, month: str, day: str, area: list
+    client,
+    output_dir: Path,
+    year: str,
+    month: str,
+    days: List[str],
+    area: list,
+    force: bool = False,
 ) -> bool:
     """Descarga variables superficiales en superficie simple."""
     target_sfc = output_dir / f"era5_sfc_{year}_{month}.nc"
-    target_sfc_daily = output_dir / f"era5_sfc_{year}_{month}_{day}.nc"
 
-    if target_sfc.exists():
+    if target_sfc.exists() and not force:
         logger.info(
-            "Archivo superficial existente detectado: %s (Omitiendo)", target_sfc.name
+            "Archivo superficial existente detectado: %s (Omitiendo. Use --force)",
+            target_sfc.name,
         )
         return True
 
@@ -149,70 +159,66 @@ def _download_sfc(
                 "variable": SURFACE_VARIABLES,
                 "year": year,
                 "month": month,
-                "day": [day],
+                "day": days,
                 "time": HOURLY_STEPS,
                 "area": area,
             },
             str(target_sfc),
         )
         logger.info("✔ Descarga superficial completada con éxito: %s", target_sfc.name)
-        if not target_sfc_daily.exists():
-            try:
-                os.link(target_sfc, target_sfc_daily)
-            except OSError:
-                pass
         return True
     except Exception as e:
         logger.error("Error durante la descarga de variables superficiales: %s", e)
         return False
 
 
-def fetch_era5_smoke_test(
+def fetch_era5(
     output_dir: Path = Path("/mnt/hpc_scratch/joro-hpc/era5_nc_active"),
     bbox: Tuple[float, float, float, float] = (-95.0, 25.0, -70.0, 45.0),
     year: str = "2014",
     month: str = "05",
-    day: str = "01",
+    days: List[str] | None = None,
+    force: bool = False,
 ) -> bool:
-    """
-    Descarga quirúrgica para el Smoke Test de la Fase 1:
-    Exclusivamente 24 horas del 1 de mayo de 2014.
-    """
+    """Descarga tensores horarios de ERA5 para el periodo especificado."""
+    if days is None:
+        days = ["01", "02", "03", "04", "05", "06", "07"]
+
     output_dir.mkdir(parents=True, exist_ok=True)
     lon_min, lat_min, lon_max, lat_max = bbox
     area = [lat_max, lon_min, lat_min, lon_max]
 
+    total_hours = len(days) * 24
     logger.info("════════════════════════════════════════════════════════════")
-    logger.info("  JORO-HPC · Descarga Quirúrgica ERA5 (Fase 1 Smoke Test)  ")
+    logger.info(
+        "  JORO-HPC · Descarga ERA5 (%d horas: %s días)  ", total_hours, len(days)
+    )
     logger.info("════════════════════════════════════════════════════════════")
     logger.info("Directorio destino : %s", output_dir)
-    logger.info("Fecha solicitada   : %s-%s-%s (24 horas UTC)", year, month, day)
-    logger.info(
-        "Dominio espacial   : Norte=%.1f, Oeste=%.1f, Sur=%.1f, Este=%.1f", *area
-    )
+    logger.info("Periodo            : %s-%s, Días=%s", year, month, days)
+    logger.info("Dominio espacial   : N=%.1f, W=%.1f, S=%.1f, E=%.1f", *area)
     logger.info("Niveles de presión : %s", ", ".join(SELECTED_PRESSURE_LEVELS))
 
     client = get_cds_client()
     if client is None:
-        logger.warning(
-            "Cliente CDS no autenticado. "
-            "Verifique ~/.cdsapirc para habilitar la descarga en vivo."
-        )
+        logger.warning("Cliente CDS no autenticado. Verifique ~/.cdsapirc.")
         return False
 
-    if not _download_3d(client, output_dir, year, month, day, area):
+    if not _download_3d(client, output_dir, year, month, days, area, force=force):
         return False
 
-    if not _download_sfc(client, output_dir, year, month, day, area):
+    if not _download_sfc(client, output_dir, year, month, days, area, force=force):
         return False
 
-    logger.info("✔ Ingesta meteorológica para el Smoke Test finalizada exitosamente.")
+    logger.info(
+        "✔ Ingesta meteorológica ERA5 (%d horas) finalizada exitosamente.", total_hours
+    )
     return True
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Descarga Quirúrgica ERA5 (Smoke Test Fase 1 JORO-HPC)"
+        description="Descarga ERA5 (Fase 2 Piloto 7 Días JORO-HPC)"
     )
     parser.add_argument(
         "--output-dir",
@@ -231,15 +237,29 @@ if __name__ == "__main__":
         help="Mes objetivo (default: 05 - Mayo)",
     )
     parser.add_argument(
-        "--day",
-        default="01",
-        help="Día objetivo (default: 01)",
+        "--days",
+        nargs="+",
+        default=["01", "02", "03", "04", "05", "06", "07"],
+        help="Días del mes a descargar (default: 01 a 07)",
+    )
+    parser.add_argument(
+        "--week1",
+        action="store_true",
+        default=True,
+        help="Descargar primera semana de mayo (días 01 a 07 = 168 horas)",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        default=False,
+        help="Sobrescribir archivos existentes si ya fueron descargados",
     )
     args = parser.parse_args()
 
-    fetch_era5_smoke_test(
+    fetch_era5(
         output_dir=args.output_dir,
         year=args.year,
         month=args.month,
-        day=args.day,
+        days=args.days,
+        force=args.force,
     )

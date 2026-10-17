@@ -10,6 +10,7 @@ namespace joro {
 namespace constants {
     constexpr double g = 9.80665;             ///< Aceleración gravitacional [m/s^2]
     constexpr double R_d = 287.058;           ///< Constante de los gases para aire seco [J/(kg*K)]
+    constexpr double R_earth = 6371000.0;     ///< Radio volumétrico medio de la Tierra [m]
     constexpr double rho_air_sfc = 1.225;     ///< Densidad del aire a nivel del mar [kg/m^3]
     constexpr double mu_air = 1.81e-5;        ///< Viscosidad dinámica del aire [Pa*s]
     constexpr double von_karman = 0.40;       ///< Constante de von Kármán (adimensional)
@@ -39,6 +40,8 @@ struct Particle3D {
     float weight = 1.0f;      ///< Peso de super-partícula (número de propágulos representados)
     uint32_t origin_cell = 0; ///< ID de la celda de origen en grid_5km
     bool is_active = true;    ///< True si está en suspensión, False si aterrizó o salió
+    float origin_x = 0.0f;    ///< Longitud inicial de despegue [grados WGS84]
+    float origin_y = 0.0f;    ///< Latitud inicial de despegue [grados WGS84]
 };
 
 /// Registro de una celda de la cuadrícula de 5 km x 5 km

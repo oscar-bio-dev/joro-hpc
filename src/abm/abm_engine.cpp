@@ -30,7 +30,7 @@ void AbmEngine::deposit_arrivals(const std::unordered_map<int32_t, uint32_t>& ar
 DemographyYearSummary AbmEngine::step_annual_cycle(
     const std::vector<GridCell>& cells,
     const std::vector<float>& mean_winter_temp_c,
-    const std::vector<float>& /*mean_summer_temp_c*/) 
+    const std::vector<float>& mean_summer_temp_c) 
 {
     DemographyYearSummary summary;
     std::mt19937 rng(42819);
@@ -80,32 +80,50 @@ DemographyYearSummary AbmEngine::step_annual_cycle(
         }
     }
 
-    // 2. Reproducción local (Fecundidad densodependiente) y Baloneo
+    // 2. Reproducción local (Fecundidad densodependiente modulada por Q10 y temperatura estival) y Baloneo
     std::unordered_map<int32_t, float> local_recruits_per_cell;
 
     for (const auto& cell : cells) {
         float n_adults = summary.adult_density_per_cell[cell.cell_id];
         if (n_adults <= 0.0f) continue;
 
+        float t_summer = 22.0f; // Temperatura de referencia [°C]
+        auto it = cell_idx_map.find(cell.cell_id);
+        if (it != cell_idx_map.end() && it->second < mean_summer_temp_c.size()) {
+            t_summer = mean_summer_temp_c[it->second];
+        }
+
+        // Modulación de fecundidad por temperatura vía cinética enzimática Q10
+        // F_eff = F * Q10^((T_summer - 20) / 10)
+        float q10_factor = std::pow(params_.q10, (t_summer - 20.0f) / 10.0f);
+        q10_factor = std::clamp(q10_factor, 0.2f, 3.5f);
+        float fecundity_eff = params_.fecundity_F * q10_factor;
+
         float k_i = compute_carrying_capacity(cell);
         // Formulación canónica de Beverton-Holt para organismos anuales semélparos:
         // mu_B = (R0 * N) / (1 + ((R0 - 1) / K_i) * N), garantizando estabilidad asintótica en K_i
-        const float r0 = params_.fecundity_F * 0.5f * params_.q_viab;
+        const float r0 = fecundity_eff * 0.5f * params_.q_viab;
         const float mu_b = (r0 * n_adults) / (1.0f + ((r0 - 1.0f) / k_i) * n_adults);
         if (mu_b <= 0.0f) continue;
 
         float total_b = mu_b;
         summary.total_offspring += static_cast<uint64_t>(total_b);
 
-        // Fracción que emprende baloneo aéreo P^{aereos} ~ Binomial(B, q_balloon)
-        uint32_t n_ballooners = static_cast<uint32_t>(total_b * params_.q_balloon);
+        // Fracción que emprende baloneo aéreo estocástico P^{aéreos} ~ Binomial(B, q_balloon)
+        uint32_t total_b_int = static_cast<uint32_t>(std::round(total_b));
+        uint32_t n_ballooners = 0;
+        if (total_b_int > 0) {
+            std::binomial_distribution<uint32_t> binom_dist(total_b_int, params_.q_balloon);
+            n_ballooners = binom_dist(rng);
+        }
+
         if (n_ballooners > 0) {
             summary.ballooners_per_cell[cell.cell_id] = n_ballooners;
             summary.total_ballooners += n_ballooners;
         }
 
         // Descendencia que permanece local (no balonea)
-        float local_b = total_b - static_cast<float>(n_ballooners);
+        float local_b = std::max(0.0f, total_b - static_cast<float>(n_ballooners));
         if (local_b > 0.0f) {
             local_recruits_per_cell[cell.cell_id] = local_b;
         }

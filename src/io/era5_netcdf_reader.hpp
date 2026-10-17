@@ -26,6 +26,7 @@ struct AtmosphericField3D {
     
     // Variables superficiales 2D [tiempo][latitud][longitud]
     std::vector<float> sp;      ///< Presión superficial [Pa]
+    std::vector<float> t2m;     ///< Temperatura del aire a 2m [°C]
     std::vector<float> u10;     ///< Viento a 10m zonal [m/s]
     std::vector<float> v10;     ///< Viento a 10m meridional [m/s]
     std::vector<float> blh;     ///< Altura de capa límite [m]
