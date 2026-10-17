@@ -144,7 +144,8 @@ joro-hpc/
 ├── scripts/
 │   ├── sql/
 │   │   ├── 01_schema_postgis.sql      # EPSG:5070 5km grid, NLCD covariates, TGB Araneae effort
-│   │   └── 02_spatial_blocks.sql      # EPA Level III ecoregion blocks (2014-2019 vs 2020-2024)
+│   │   ├── 02_spatial_blocks.sql      # EPA Level III ecoregion blocks (2014-2019 vs 2020-2024)
+│   │   └── 03_seed_smoke_grid.sql     # Fast synthetic EPSG:5070 grid & Georgia seed generator (Smoke Test)
 │   └── python/
 │       ├── data_pipeline.py           # Main CLI orchestrator
 │       ├── fetch_gbif_tgb.py          # GBIF occurrences + Araneae TGB effort + iNat API

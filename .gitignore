@@ -52,6 +52,7 @@ venv/
 *.swo
 *~
 .DS_Store
+pyrightconfig.json
 
 # ── CMake cache ──────────────────────────────────────────────────────────────
 CMakeCache.txt
