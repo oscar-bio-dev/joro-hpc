@@ -5,7 +5,15 @@
 #include <iostream>
 
 #if defined(_OPENMP)
-#include <omp.h>
+  #if defined(__has_include)
+    #if __has_include(<omp.h>)
+      #include <omp.h>
+      #define JORO_HAS_OMP_HEADER 1
+    #endif
+  #else
+    #include <omp.h>
+    #define JORO_HAS_OMP_HEADER 1
+  #endif
 #endif
 
 namespace joro::lpdm {
@@ -60,7 +68,7 @@ public:
         #pragma omp parallel
         {
             // Generador de números pseudoaleatorios independiente por hilo
-            #if defined(_OPENMP)
+            #if defined(JORO_HAS_OMP_HEADER)
             std::mt19937 rng(42819 + omp_get_thread_num() * 10007);
             #else
             std::mt19937 rng(42819);
