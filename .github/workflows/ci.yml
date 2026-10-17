@@ -23,7 +23,7 @@ jobs:
       matrix:
         compiler:
           - { cc: gcc-13, cxx: g++-13 }
-          - { cc: clang-17, cxx: clang++-17 }
+          - { cc: clang-18, cxx: clang++-18 }
 
     steps:
       - name: Checkout repository
@@ -39,7 +39,6 @@ jobs:
             libnetcdf-dev \
             libpqxx-dev \
             libomp-dev \
-            libomp-17-dev \
             ${{ matrix.compiler.cc }} \
             ${{ matrix.compiler.cxx }}
 
