@@ -16,8 +16,8 @@ from sqlalchemy import create_engine, text
 
 logger = logging.getLogger("joro.gbif")
 
-JORO_TAXON_KEY = 5167542      # Trichonephila clavata
-ARANEAE_TAXON_KEY = 1496      # Orden Araneae (grupo objetivo para esfuerzo TGB)
+JORO_TAXON_KEY = 5167542  # Trichonephila clavata
+ARANEAE_TAXON_KEY = 1496  # Orden Araneae (grupo objetivo para esfuerzo TGB)
 
 
 def download_gbif_paginated(
@@ -58,16 +58,20 @@ def download_gbif_paginated(
             for r in results:
                 year = r.get("year")
                 if year and int(year) in years:
-                    all_records.append({
-                        "gbif_id": r.get("key"),
-                        "species": r.get("species", "Trichonephila clavata"),
-                        "year": int(year),
-                        "month": r.get("month"),
-                        "latitude": r.get("decimalLatitude"),
-                        "longitude": r.get("decimalLongitude"),
-                        "coord_uncertainty_m": r.get("coordinateUncertaintyInMeters", 1000.0),
-                        "basis_of_record": r.get("basisOfRecord"),
-                    })
+                    all_records.append(
+                        {
+                            "gbif_id": r.get("key"),
+                            "species": r.get("species", "Trichonephila clavata"),
+                            "year": int(year),
+                            "month": r.get("month"),
+                            "latitude": r.get("decimalLatitude"),
+                            "longitude": r.get("decimalLongitude"),
+                            "coord_uncertainty_m": r.get(
+                                "coordinateUncertaintyInMeters", 1000.0
+                            ),
+                            "basis_of_record": r.get("basisOfRecord"),
+                        }
+                    )
 
             offset += len(results)
             if res.get("endOfRecords", True):
@@ -77,7 +81,9 @@ def download_gbif_paginated(
             break
 
     df = pd.DataFrame(all_records)
-    logger.info("Descarga finalizada para Taxon %d: %d registros filtrados.", taxon_key, len(df))
+    logger.info(
+        "Descarga finalizada para Taxon %d: %d registros filtrados.", taxon_key, len(df)
+    )
     return df
 
 
@@ -94,7 +100,9 @@ def fetch_all_occurrences(
     df_joro = download_gbif_paginated(JORO_TAXON_KEY, bbox, years, max_records=limit)
 
     # 2. Descargar registros del grupo objetivo (Araneae) para cuantificar esfuerzo observacional
-    df_araneae = download_gbif_paginated(ARANEAE_TAXON_KEY, bbox, years, max_records=limit)
+    df_araneae = download_gbif_paginated(
+        ARANEAE_TAXON_KEY, bbox, years, max_records=limit
+    )
 
     if df_joro.empty and df_araneae.empty:
         logger.warning("No se obtuvieron registros (sin conexión o API indisponible).")
@@ -102,13 +110,17 @@ def fetch_all_occurrences(
 
     # 3. Convertir a GeoDataFrames con geometría WGS84
     if not df_joro.empty:
-        geometry_joro = [Point(xy) for xy in zip(df_joro["longitude"], df_joro["latitude"])]
+        geometry_joro = [
+            Point(xy) for xy in zip(df_joro["longitude"], df_joro["latitude"])
+        ]
         gdf_joro = gpd.GeoDataFrame(df_joro, geometry=geometry_joro, crs="EPSG:4326")
 
         try:
             # Subir ocurrencias crudas a occurrences_raw
             logger.info("Insertando %d registros en occurrences_raw...", len(gdf_joro))
-            gdf_joro.to_postgis("occurrences_raw", engine, if_exists="append", index=False)
+            gdf_joro.to_postgis(
+                "occurrences_raw", engine, if_exists="append", index=False
+            )
         except Exception as e:
             logger.warning("No se pudo escribir en occurrences_raw: %s", e)
 
@@ -116,33 +128,61 @@ def fetch_all_occurrences(
     logger.info("Calculando matriz de esfuerzo y detección en malla 5x5 km...")
     try:
         # Cargar malla existente
-        grid_gdf = gpd.read_postgis("SELECT cell_id, geom_wgs84 as geometry FROM grid_5km;", engine, geom_col="geometry")
-        
+        grid_gdf = gpd.read_postgis(
+            "SELECT cell_id, geom_wgs84 as geometry FROM grid_5km;",
+            engine,
+            geom_col="geometry",
+        )
+
         # Intersección espacial
         if not df_joro.empty:
-            joined_joro = gpd.sjoin(gdf_joro, grid_gdf, how="inner", predicate="intersects")
-            agg_joro = joined_joro.groupby(["cell_id", "year"]).size().reset_index(name="joro_count")
+            joined_joro = gpd.sjoin(
+                gdf_joro, grid_gdf, how="inner", predicate="intersects"
+            )
+            agg_joro = (
+                joined_joro.groupby(["cell_id", "year"])
+                .size()
+                .reset_index(name="joro_count")
+            )
             agg_joro["y_joro_detected"] = 1
         else:
-            agg_joro = pd.DataFrame(columns=["cell_id", "year", "joro_count", "y_joro_detected"])
+            agg_joro = pd.DataFrame(
+                columns=["cell_id", "year", "joro_count", "y_joro_detected"]
+            )
 
         # Esfuerzo Araneae
         if not df_araneae.empty:
-            geom_araneae = [Point(xy) for xy in zip(df_araneae["longitude"], df_araneae["latitude"])]
-            gdf_araneae = gpd.GeoDataFrame(df_araneae, geometry=geom_araneae, crs="EPSG:4326")
-            joined_araneae = gpd.sjoin(gdf_araneae, grid_gdf, how="inner", predicate="intersects")
-            agg_araneae = joined_araneae.groupby(["cell_id", "year"]).size().reset_index(name="effort_araneae")
+            geom_araneae = [
+                Point(xy) for xy in zip(df_araneae["longitude"], df_araneae["latitude"])
+            ]
+            gdf_araneae = gpd.GeoDataFrame(
+                df_araneae, geometry=geom_araneae, crs="EPSG:4326"
+            )
+            joined_araneae = gpd.sjoin(
+                gdf_araneae, grid_gdf, how="inner", predicate="intersects"
+            )
+            agg_araneae = (
+                joined_araneae.groupby(["cell_id", "year"])
+                .size()
+                .reset_index(name="effort_araneae")
+            )
         else:
             agg_araneae = pd.DataFrame(columns=["cell_id", "year", "effort_araneae"])
 
         # Unión y persistencia
-        obs_matrix = pd.merge(agg_joro, agg_araneae, on=["cell_id", "year"], how="outer").fillna(0)
+        obs_matrix = pd.merge(
+            agg_joro, agg_araneae, on=["cell_id", "year"], how="outer"
+        ).fillna(0)
         obs_matrix["y_joro_detected"] = obs_matrix["y_joro_detected"].astype(int)
         obs_matrix["joro_count"] = obs_matrix["joro_count"].astype(int)
         obs_matrix["effort_araneae"] = obs_matrix["effort_araneae"].astype(int)
 
-        logger.info("Guardando %d filas en cell_annual_observations...", len(obs_matrix))
-        obs_matrix.to_sql("cell_annual_observations", engine, if_exists="append", index=False)
+        logger.info(
+            "Guardando %d filas en cell_annual_observations...", len(obs_matrix)
+        )
+        obs_matrix.to_sql(
+            "cell_annual_observations", engine, if_exists="append", index=False
+        )
         logger.info("cell_annual_observations actualizada exitosamente.")
 
     except Exception as e:

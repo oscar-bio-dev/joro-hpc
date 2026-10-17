@@ -46,19 +46,25 @@ def load_config(config_path: Path) -> dict:
         sys.exit(1)
 
     if tomllib is None:
-        logger.warning("Librerías 'tomllib' o 'tomli' no disponibles. Usando configuración fallback.")
+        logger.warning(
+            "Librerías 'tomllib' o 'tomli' no disponibles. Usando configuración fallback."
+        )
         return {
             "storage": {
                 "datalake_root": "/mnt/ecotech_datalake",
                 "scratch_root": "/mnt/hpc_scratch/joro-hpc",
             },
             "domain": {
-                "lon_min": -95.0, "lon_max": -70.0,
-                "lat_min": 25.0, "lat_max": 45.0,
+                "lon_min": -95.0,
+                "lon_max": -70.0,
+                "lat_min": 25.0,
+                "lat_max": 45.0,
             },
             "temporal": {
-                "calib_start_year": 2014, "eval_end_year": 2024,
-                "ballooning_start_month": 5, "ballooning_end_month": 7,
+                "calib_start_year": 2014,
+                "eval_end_year": 2024,
+                "ballooning_start_month": 5,
+                "ballooning_end_month": 7,
             },
             "atmosphere": {
                 "data_dir": "/mnt/hpc_scratch/joro-hpc/era5_nc_active",
@@ -84,7 +90,13 @@ def stage_nlcd(
         - Land Cover (clasificación de vegetación para bordes -> Z_borde)
     """
     logger.info("=== [Staging NLCD] Data Lake -> NVMe Scratch ===")
-    logger.info("BBox de recorte: lon [%.1f, %.1f], lat [%.1f, %.1f]", bbox[0], bbox[2], bbox[1], bbox[3])
+    logger.info(
+        "BBox de recorte: lon [%.1f, %.1f], lat [%.1f, %.1f]",
+        bbox[0],
+        bbox[2],
+        bbox[1],
+        bbox[3],
+    )
 
     target_dir = scratch_root / "nlcd_raw"
     source_dir = datalake_root / "nlcd"
@@ -95,7 +107,10 @@ def stage_nlcd(
     nlcd_layers = [
         ("nlcd_impervious_2021.tif", "Z_imp (Impermeabilidad urbana)"),
         ("nlcd_canopy_2021.tif", "Z_dosel (Cobertura de dosel arbóreo)"),
-        ("nlcd_landcover_2021.tif", "Z_borde (Mosaico de cobertura y bordes de bosque)"),
+        (
+            "nlcd_landcover_2021.tif",
+            "Z_borde (Mosaico de cobertura y bordes de bosque)",
+        ),
     ]
 
     for filename, description in nlcd_layers:
@@ -107,7 +122,10 @@ def stage_nlcd(
         if src_file.exists():
             logger.info("  Archivo maestro encontrado en Data Lake: %s", src_file)
             if dry_run:
-                logger.info("  [DRY-RUN] Se ejecutaría gdalwarp/rasterio clip hacia: %s", dst_file)
+                logger.info(
+                    "  [DRY-RUN] Se ejecutaría gdalwarp/rasterio clip hacia: %s",
+                    dst_file,
+                )
             else:
                 try:
                     # En producción con GDAL instalado: recortar al BBox
@@ -120,7 +138,8 @@ def stage_nlcd(
             logger.warning(
                 "  Aviso: Capa maestra '%s' no presente en Data Lake (%s). "
                 "Creando placeholder en scratch para habilitar pipeline.",
-                filename, src_file
+                filename,
+                src_file,
             )
             if not dry_run:
                 # Crear placeholder indicando metadatos para que el orquestador no aborte
@@ -156,7 +175,7 @@ def stage_era5(
         for month in active_months:
             file_types = [
                 f"era5_uvwt_{year}_{month}.nc",  # 12 niveles 3D (u, v, w, T)
-                f"era5_sfc_{year}_{month}.nc",   # 5 variables superficiales
+                f"era5_sfc_{year}_{month}.nc",  # 5 variables superficiales
             ]
 
             for fname in file_types:
@@ -181,10 +200,15 @@ def stage_era5(
                     missing_count += 1
                     logger.debug("  Tensor no presente en Data Lake: %s", fname)
 
-    logger.info("Resumen de Staging ERA5: %d tensores listos en scratch, %d pendientes en Data Lake.",
-                staged_count, missing_count)
+    logger.info(
+        "Resumen de Staging ERA5: %d tensores listos en scratch, %d pendientes en Data Lake.",
+        staged_count,
+        missing_count,
+    )
     if missing_count > 0:
-        logger.info("Para descargar los tensores pendientes vía Copernicus CDS, ejecute:")
+        logger.info(
+            "Para descargar los tensores pendientes vía Copernicus CDS, ejecute:"
+        )
         logger.info("  python scripts/python/fetch_era5_3d.py")
     logger.info("Staging de tensores ERA5 finalizado.\n")
 
@@ -219,8 +243,12 @@ def main() -> int:
 
     config = load_config(args.config)
 
-    datalake_root = Path(config.get("storage", {}).get("datalake_root", "/mnt/ecotech_datalake"))
-    scratch_root = Path(config.get("storage", {}).get("scratch_root", "/mnt/hpc_scratch/joro-hpc"))
+    datalake_root = Path(
+        config.get("storage", {}).get("datalake_root", "/mnt/ecotech_datalake")
+    )
+    scratch_root = Path(
+        config.get("storage", {}).get("scratch_root", "/mnt/hpc_scratch/joro-hpc")
+    )
 
     domain = config.get("domain", {})
     bbox = (
@@ -247,7 +275,14 @@ def main() -> int:
         stage_nlcd(datalake_root, scratch_root, bbox, dry_run=args.dry_run)
 
     if args.action in ("era5", "all"):
-        stage_era5(datalake_root, scratch_root, years, active_months, dry_run=args.dry_run, use_symlink=args.symlink)
+        stage_era5(
+            datalake_root,
+            scratch_root,
+            years,
+            active_months,
+            dry_run=args.dry_run,
+            use_symlink=args.symlink,
+        )
 
     logger.info("Pipeline de Staging finalizado con éxito.")
     return 0

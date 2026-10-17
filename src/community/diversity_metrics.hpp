@@ -61,4 +61,21 @@ namespace joro::community {
     return 0.0;
 }
 
+/// Índice de similitud de Jaccard entre dos comunidades (presencia/ausencia de especies)
+[[nodiscard]] inline double compute_jaccard_similarity(
+    const std::vector<uint8_t>& presence_a,
+    const std::vector<uint8_t>& presence_b) noexcept
+{
+    if (presence_a.empty() || presence_a.size() != presence_b.size()) return 0.0;
+    size_t intersection_count = 0;
+    size_t union_count = 0;
+    for (size_t i = 0; i < presence_a.size(); ++i) {
+        bool a = (presence_a[i] != 0);
+        bool b = (presence_b[i] != 0);
+        if (a && b) intersection_count++;
+        if (a || b) union_count++;
+    }
+    return (union_count > 0) ? (static_cast<double>(intersection_count) / union_count) : 1.0;
+}
+
 } // namespace joro::community

@@ -17,16 +17,33 @@ from typing import List, Tuple
 logger = logging.getLogger("joro.era5")
 
 SELECTED_PRESSURE_LEVELS = [
-    "1000", "975", "950", "925", "900", "875", "850", "825", "800", "775", "750", "700"
+    "1000",
+    "975",
+    "950",
+    "925",
+    "900",
+    "875",
+    "850",
+    "825",
+    "800",
+    "775",
+    "750",
+    "700",
 ]
 
 SURFACE_VARIABLES = [
-    "surface_pressure", "2m_temperature", "10m_u_component_of_wind",
-    "10m_v_component_of_wind", "boundary_layer_height"
+    "surface_pressure",
+    "2m_temperature",
+    "10m_u_component_of_wind",
+    "10m_v_component_of_wind",
+    "boundary_layer_height",
 ]
 
 PRESSURE_VARIABLES = [
-    "u_component_of_wind", "v_component_of_wind", "vertical_velocity", "temperature"
+    "u_component_of_wind",
+    "v_component_of_wind",
+    "vertical_velocity",
+    "temperature",
 ]
 
 HOURLY_STEPS = [f"{h:02d}:00" for h in range(24)]
@@ -37,13 +54,16 @@ def get_cds_client():
     """Inicializa el cliente de CDS API verificando configuración."""
     try:
         import cdsapi
+
         return cdsapi.Client()
     except ImportError:
         logger.error("Librería 'cdsapi' no instalada. Ejecute: pip install cdsapi")
         return None
     except Exception as e:
         logger.error("Error al inicializar cdsapi.Client: %s", e)
-        logger.info("Asegúrese de configurar el archivo ~/.cdsapirc con su URL y API Key de Copernicus CDS.")
+        logger.info(
+            "Asegúrese de configurar el archivo ~/.cdsapirc con su URL y API Key de Copernicus CDS."
+        )
         return None
 
 
@@ -65,7 +85,9 @@ def download_era5_season(
 
     client = get_cds_client()
     if client is None:
-        logger.warning("Operando en modo demostración/dry-run. Cree ~/.cdsapirc para habilitar descargas reales.")
+        logger.warning(
+            "Operando en modo demostración/dry-run. Cree ~/.cdsapirc para habilitar descargas reales."
+        )
         return
 
     for year in years:
@@ -94,14 +116,18 @@ def download_era5_season(
                     )
                     logger.info("Descargado con éxito: %s", target_3d.name)
                 except Exception as e:
-                    logger.error("Fallo al descargar campos 3D (%d-%s): %s", year, month, e)
+                    logger.error(
+                        "Fallo al descargar campos 3D (%d-%s): %s", year, month, e
+                    )
 
             # 2. Descarga de variables superficiales
             target_sfc = output_dir / f"era5_sfc_{year}_{month}.nc"
             if target_sfc.exists():
                 logger.info("Archivo existente, omitiendo: %s", target_sfc.name)
             else:
-                logger.info("Solicitando variables superficiales: %s...", target_sfc.name)
+                logger.info(
+                    "Solicitando variables superficiales: %s...", target_sfc.name
+                )
                 try:
                     client.retrieve(
                         "reanalysis-era5-single-levels",
@@ -119,6 +145,11 @@ def download_era5_season(
                     )
                     logger.info("Descargado con éxito: %s", target_sfc.name)
                 except Exception as e:
-                    logger.error("Fallo al descargar variables superficiales (%d-%s): %s", year, month, e)
+                    logger.error(
+                        "Fallo al descargar variables superficiales (%d-%s): %s",
+                        year,
+                        month,
+                        e,
+                    )
 
     logger.info("Proceso de descarga ERA5 completado.")

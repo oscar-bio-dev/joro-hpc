@@ -63,8 +63,12 @@ def train_surrogate_models(
     )
 
     if model_type == "gp":
-        kernel = ConstantKernel(1.0) * Matern(length_scale=1.0, nu=2.5) + WhiteKernel(noise_level=1e-3)
-        model = GaussianProcessRegressor(kernel=kernel, n_restarts_optimizer=10, normalize_y=True)
+        kernel = ConstantKernel(1.0) * Matern(length_scale=1.0, nu=2.5) + WhiteKernel(
+            noise_level=1e-3
+        )
+        model = GaussianProcessRegressor(
+            kernel=kernel, n_restarts_optimizer=10, normalize_y=True
+        )
     else:
         model = RandomForestRegressor(n_estimators=300, max_depth=12, random_state=42)
 
@@ -75,5 +79,10 @@ def train_surrogate_models(
         "rmse": float(np.sqrt(mean_squared_error(y_test, y_pred))),
         "r2": float(r2_score(y_test, y_pred)),
     }
-    logger.info("Entrenamiento del emulador (%s) finalizado: RMSE=%.4f, R²=%.4f", model_type, metrics["rmse"], metrics["r2"])
+    logger.info(
+        "Entrenamiento del emulador (%s) finalizado: RMSE=%.4f, R²=%.4f",
+        model_type,
+        metrics["rmse"],
+        metrics["r2"],
+    )
     return model, metrics
