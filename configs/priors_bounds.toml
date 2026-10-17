@@ -77,3 +77,28 @@ silk_length_m_max = 2.30
 # Coeficiente de postura chi: 0.5 (compacta) a 1.0 (paracaídas extendido)
 posture_chi_min = 0.5
 posture_chi_max = 1.0
+
+[carrying_capacity]
+# Capacidad de carga base en hábitat promedio (K0) (Sección 8.4 de JORO-HPC.tex)
+k0_min = 1000.0
+k0_max = 20000.0
+k0_default = 5000.0
+
+# Coeficiente para impermeabilidad urbana Z_imp (gamma1)
+gamma1_imp_min = 0.10
+gamma1_imp_max = 1.00
+gamma1_imp_default = 0.45
+
+# Coeficiente para densidad de borde de bosque Z_borde (gamma2)
+gamma2_borde_min = 0.20
+gamma2_borde_max = 1.20
+gamma2_borde_default = 0.65
+
+# Coeficiente para dosel arbóreo Z_dosel (gamma3)
+gamma3_dosel_min = 0.05
+gamma3_dosel_max = 0.80
+gamma3_dosel_default = 0.30
+
+# Cotas de truncamiento [K_min, K_max]
+k_min = 100.0
+k_max = 50000.0

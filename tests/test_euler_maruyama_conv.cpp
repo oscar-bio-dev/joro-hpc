@@ -1,9 +1,9 @@
 #include "lpdm/langevin_turbulence.hpp"
+#include "test_common.hpp"
 #include <iostream>
 #include <vector>
 #include <cmath>
 #include <random>
-#include <cassert>
 
 /// Prueba numérica de convergencia débil del esquema estocástico de Euler-Maruyama
 /// según Kloeden & Platen (1992) y Sección 7.6 de JORO-HPC.tex.
@@ -82,8 +82,8 @@ int main() {
     }
 
     // Verificar que el error para dt fino (0.25 s) es acotado y menor que para dt grueso (2.0 s)
-    assert(errors.back() < 0.25);
-    assert(errors.front() >= 0.0);
+    JORO_TEST_ASSERT(errors.back() < 0.25, "Error débil de Euler-Maruyama excesivo para dt fino");
+    JORO_TEST_ASSERT(errors.front() >= 0.0, "Error débil inválido");
 
     std::cout << "✔ test_euler_maruyama_conv PASÓ: Convergencia estocástica verificada.\n";
     return 0;

@@ -198,9 +198,12 @@ git clone https://github.com/oscar-bio-dev/joro-hpc.git
 cd joro-hpc
 
 # 3. Configure out-of-source build with icpx
+# Use -DJORO_ENABLE_AVX512=ON for dedicated Core i9-11900K hardware,
+# or default (OFF) for portable x86-64-v3 builds on cloud CI runners.
 cmake -B build \
     -DCMAKE_CXX_COMPILER=icpx \
-    -DCMAKE_BUILD_TYPE=Release
+    -DCMAKE_BUILD_TYPE=Release \
+    -DJORO_ENABLE_AVX512=ON
 
 # 4. Compile core library, main executable, tests, and benchmarks
 cmake --build build -j$(nproc)
@@ -208,8 +211,10 @@ cmake --build build -j$(nproc)
 
 ### 3. Running Verification Tests & Benchmarks
 
+> **Scientific Verification Guarantee:** All numerical tests use NDEBUG-invariant assertions (`JORO_TEST_ASSERT` with `-UNDEBUG`). Tests genuinely execute full stochastic ensembles, parameter recovery optimization, and GPU-CPU statistical equivalence rather than returning passive no-ops in Release mode.
+
 ```bash
-# Run unit tests
+# Run unit tests (100% active assertions in Release and Debug)
 ctest --test-dir build --output-on-failure
 
 # Run SIMD / AVX-512 benchmark

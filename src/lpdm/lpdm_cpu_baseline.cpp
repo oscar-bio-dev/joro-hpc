@@ -16,12 +16,18 @@ public:
         const std::vector<GridCell>& cells,
         const std::unordered_map<int32_t, uint32_t>& propagules_per_cell) override 
     {
+        cells_ = cells;
         particles_.clear();
+        constexpr uint32_t MAX_PARTICLES_PER_CELL = 200;
+
         for (const auto& cell : cells) {
             auto it = propagules_per_cell.find(cell.cell_id);
             if (it != propagules_per_cell.end() && it->second > 0) {
-                uint32_t n = it->second;
-                for (uint32_t i = 0; i < n; ++i) {
+                uint32_t total_props = it->second;
+                uint32_t n_sim = std::min(total_props, MAX_PARTICLES_PER_CELL);
+                float weight_per_p = static_cast<float>(total_props) / static_cast<float>(n_sim);
+
+                for (uint32_t i = 0; i < n_sim; ++i) {
                     Particle3D p;
                     p.x = cell.centroid_lon;
                     p.y = cell.centroid_lat;
@@ -30,6 +36,7 @@ public:
                     p.mass_mg = 1.2f;
                     p.silk_length_m = 0.8f;
                     p.posture_chi = 0.85f;
+                    p.weight = weight_per_p;
                     p.origin_cell = cell.cell_id;
                     p.is_active = true;
                     particles_.push_back(p);
@@ -44,8 +51,6 @@ public:
         int total_steps) override 
     {
         DispersionResult result;
-        result.total_released = particles_.size();
-
         if (particles_.empty()) {
             return result;
         }
@@ -100,13 +105,34 @@ public:
             }
         }
 
-        // Reducción secuencial de resultados
+        // Reducción espacial: acreditar aterrizaje en la celda geográfica de destino real
         for (const auto& p : particles_) {
+            uint32_t w = static_cast<uint32_t>(std::round(p.weight));
+            result.total_released += w;
+
             if (!p.is_active) {
-                result.total_landed++;
-                result.arrivals_per_cell[p.origin_cell]++;
+                result.total_landed += w;
+
+                int32_t dest_cell_id = -1;
+                double min_dist_sq = 1e9;
+                for (const auto& c : cells_) {
+                    double dx = c.centroid_lon - p.x;
+                    double dy = c.centroid_lat - p.y;
+                    double d2 = dx * dx + dy * dy;
+                    if (d2 < min_dist_sq) {
+                        min_dist_sq = d2;
+                        dest_cell_id = c.cell_id;
+                    }
+                }
+
+                // Asignar si aterrizó dentro de la malla demográfica (~15 km radio)
+                if (dest_cell_id != -1 && min_dist_sq < 0.02) {
+                    result.arrivals_per_cell[dest_cell_id] += w;
+                } else {
+                    result.total_escaped += w;
+                }
             } else {
-                result.total_escaped++;
+                result.total_escaped += w;
             }
         }
 
@@ -114,6 +140,7 @@ public:
     }
 
 private:
+    std::vector<GridCell> cells_;
     std::vector<Particle3D> particles_;
 };
 

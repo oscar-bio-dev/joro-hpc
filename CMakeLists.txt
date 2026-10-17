@@ -23,26 +23,52 @@ set(CMAKE_CXX_EXTENSIONS        OFF)
 # ─────────────────────────────────────────────────────────────────────────────
 # 2. Detección de compilador y banderas de aceleración
 # ─────────────────────────────────────────────────────────────────────────────
+option(JORO_ENABLE_AVX512 "Habilitar instrucciones AVX-512 (target Core i9-11900K / Rocket Lake)" OFF)
+option(JORO_ENABLE_NATIVE "Habilitar optimizaciones de arquitectura del host (-march=native)" OFF)
+
 if(CMAKE_CXX_COMPILER_ID MATCHES "IntelLLVM")
     message(STATUS "[Compilador] Intel oneAPI DPC++ (icpx) detectado.")
     set(JORO_SYCL_FLAGS   "-fsycl")
     set(JORO_OPENMP_FLAGS "-qopenmp")
-    set(JORO_ARCH_FLAGS   "-march=rocketlake") # AVX-512 para Core i9-11900K
+    if(JORO_ENABLE_AVX512)
+        set(JORO_ARCH_FLAGS   "-march=rocketlake") # AVX-512 para Core i9-11900K
+    elseif(JORO_ENABLE_NATIVE)
+        set(JORO_ARCH_FLAGS   "-march=native")
+    else()
+        set(JORO_ARCH_FLAGS   "-march=x86-64-v3") # Portabilidad AVX2
+    endif()
     add_compile_definitions(JORO_HAS_SYCL)
 else()
-    message(WARNING "[Compilador] Se recomienda compilar con 'icpx'. Detectado: ${CMAKE_CXX_COMPILER_ID}.")
+    message(STATUS "[Compilador] Compilador estándar detectado: ${CMAKE_CXX_COMPILER_ID}.")
     set(JORO_SYCL_FLAGS   "")
     set(JORO_OPENMP_FLAGS "-fopenmp")
-    set(JORO_ARCH_FLAGS   "-mavx512f -mavx512bw")
+    if(JORO_ENABLE_AVX512)
+        set(JORO_ARCH_FLAGS   "-mavx512f -mavx512bw")
+    elseif(JORO_ENABLE_NATIVE)
+        set(JORO_ARCH_FLAGS   "-march=native")
+    else()
+        set(JORO_ARCH_FLAGS   "-march=x86-64-v3") # Portabilidad segura para CI sin SIGILL
+    endif()
 endif()
 
-set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG ${JORO_ARCH_FLAGS}")
+set(CMAKE_CXX_FLAGS_RELEASE "-O3 ${JORO_ARCH_FLAGS}")
 set(CMAKE_CXX_FLAGS_DEBUG   "-O0 -g -fsanitize=address")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 3. Dependencias externas
 # ─────────────────────────────────────────────────────────────────────────────
-find_package(OpenMP REQUIRED)
+find_package(OpenMP)
+if(NOT OpenMP_FOUND)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        message(STATUS "[OpenMP] Configurando OpenMP para Clang...")
+        set(OpenMP_CXX_FLAGS "-fopenmp=libomp")
+        set(OpenMP_CXX_LIB_NAMES "omp")
+        set(OpenMP_omp_LIBRARY "omp")
+        find_package(OpenMP REQUIRED)
+    else()
+        find_package(OpenMP REQUIRED)
+    endif()
+endif()
 find_package(PkgConfig REQUIRED)
 
 # 3.a NetCDF-C para tensores ERA5 3D
@@ -124,6 +150,7 @@ set(JORO_TESTS
 foreach(test_name ${JORO_TESTS})
     add_executable(${test_name} tests/${test_name}.cpp)
     target_link_libraries(${test_name} PRIVATE joro_core)
+    target_compile_options(${test_name} PRIVATE -UNDEBUG) # Garantizar aserciones científicas activas
     add_test(NAME ${test_name} COMMAND ${test_name})
 endforeach()
 

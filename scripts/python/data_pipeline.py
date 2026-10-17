@@ -22,9 +22,9 @@ from typing import Any
 
 # Constantes sincronizadas con Sección 6 y 13 de JORO-HPC.tex
 STUDY_BBOX = (-95.0, 25.0, -70.0, 45.0)  # (lon_min, lat_min, lon_max, lat_max)
-YEARS_CALIBRATION = list(range(2014, 2020)) # 2014-2019
+YEARS_CALIBRATION = list(range(2014, 2020))  # 2014-2019
 YEARS_EVALUATION = list(range(2020, 2025))  # 2020-2024
-ALL_YEARS = list(range(2014, 2025))         # 2014-2024 (11 años)
+ALL_YEARS = list(range(2014, 2025))  # 2014-2024 (11 años)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -38,6 +38,7 @@ def get_db_engine(db_url: str) -> Any:
     """Retorna el motor SQLAlchemy conectado a PostgreSQL."""
     try:
         from sqlalchemy import create_engine
+
         return create_engine(db_url, pool_size=5, pool_pre_ping=True)
     except ImportError:
         logger.error("Librería 'sqlalchemy' no instalada en este entorno.")
@@ -48,6 +49,7 @@ def run_gbif_pipeline(db_url: str, limit: int = 100_000) -> None:
     """Descarga de ocurrencias y cálculo de esfuerzo de muestreo."""
     logger.info("Iniciando pipeline de GBIF + Target-Group Background (Araneae)...")
     from fetch_gbif_tgb import fetch_all_occurrences
+
     fetch_all_occurrences(db_url, STUDY_BBOX, ALL_YEARS, limit)
 
 
@@ -55,6 +57,7 @@ def run_grid_pipeline(db_url: str, data_dir: Path) -> None:
     """Construcción de malla 5km EPSG:5070 y agregación de covariables NLCD."""
     logger.info("Iniciando construcción de malla 5km y covariables NLCD...")
     from build_grid_nlcd import generate_grid_and_covariates
+
     generate_grid_and_covariates(db_url, STUDY_BBOX, data_dir)
 
 
@@ -62,6 +65,7 @@ def run_era5_pipeline(output_dir: Path) -> None:
     """Descarga de tensores 3D horarios de ERA5 vía Copernicus CDS."""
     logger.info("Iniciando descarga de campos 3D de ERA5 (NetCDF4)...")
     from fetch_era5_3d import download_era5_season
+
     download_era5_season(output_dir, STUDY_BBOX, ALL_YEARS)
 
 

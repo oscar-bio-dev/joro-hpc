@@ -1,9 +1,9 @@
 #include "lpdm/langevin_turbulence.hpp"
+#include "test_common.hpp"
 #include <iostream>
 #include <vector>
 #include <cmath>
 #include <random>
-#include <cassert>
 #include <numeric>
 
 /// Prueba numérica rigurosa de la condición well-mixed de Thomson (1987).
@@ -91,10 +91,10 @@ int main() {
 
     // Criterio de aceptación: sin segregación ni colapso de partículas en el suelo o tope
     for (int b = 0; b < n_bins; ++b) {
-        assert(bin_counts[b] > (expected_per_bin * 0.40f));
-        assert(bin_counts[b] < (expected_per_bin * 1.80f));
+        JORO_TEST_ASSERT(bin_counts[b] > (expected_per_bin * 0.40f), "Fallo de uniformidad: bin con subpoblación excesiva");
+        JORO_TEST_ASSERT(bin_counts[b] < (expected_per_bin * 1.80f), "Fallo de uniformidad: acumulación artificial de partículas");
     }
-    assert(chi_squared < 70.0f);
+    JORO_TEST_ASSERT(chi_squared < 70.0f, "El estadístico Chi-cuadrado supera el umbral crítico para distribución uniforme");
 
     std::cout << "✔ test_well_mixed PASÓ: Densidad euleriana preservada correctamente.\n";
     return 0;

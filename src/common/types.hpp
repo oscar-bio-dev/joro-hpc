@@ -36,6 +36,7 @@ struct Particle3D {
     float mass_mg = 1.0f;     ///< Masa de la araña [mg]
     float silk_length_m = 0.5f; ///< Longitud total de hilo de seda de baloneo [m]
     float posture_chi = 0.8f; ///< Factor aerodinámico de postura (0.5 = compacta, 1.0 = paracaídas)
+    float weight = 1.0f;      ///< Peso de super-partícula (número de propágulos representados)
     uint32_t origin_cell = 0; ///< ID de la celda de origen en grid_5km
     bool is_active = true;    ///< True si está en suspensión, False si aterrizó o salió
 };
