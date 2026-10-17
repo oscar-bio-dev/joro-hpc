@@ -39,6 +39,7 @@ jobs:
             libnetcdf-dev \
             libpqxx-dev \
             libomp-dev \
+            libomp-17-dev \
             ${{ matrix.compiler.cc }} \
             ${{ matrix.compiler.cxx }}
 

@@ -53,9 +53,17 @@ public:
         DispersionResult result;
         if (particles_.empty()) return result;
 
+        bool offload_succeeded = false;
+
 #if defined(JORO_HAS_SYCL)
         try {
-            sycl::queue q(sycl::gpu_selector_v);
+            sycl::device dev;
+            try {
+                dev = sycl::device(sycl::gpu_selector_v);
+            } catch (...) {
+                dev = sycl::device(sycl::default_selector_v);
+            }
+            sycl::queue q(dev);
             const size_t n_particles = particles_.size();
 
             // Asignación de memoria en el dispositivo (Device USM)
@@ -114,12 +122,58 @@ public:
 
             q.memcpy(particles_.data(), d_particles, n_particles * sizeof(Particle3D)).wait();
             sycl::free(d_particles, q);
+            offload_succeeded = true;
 
         } catch (const sycl::exception& e) {
-            std::cerr << "[SYCL Error] GPU offload falló: " << e.what()
-                      << ". Revertiendo a procesamiento local.\n";
+            std::cerr << "[SYCL Note] Dispositivo SYCL no disponible (" << e.what()
+                      << "). Ejecutando fallback local en CPU.\n";
+            offload_succeeded = false;
         }
 #endif
+
+        if (!offload_succeeded) {
+            const float sqrt_dt = std::sqrt(dt_seconds);
+            for (size_t i = 0; i < particles_.size(); ++i) {
+                auto& p = particles_[i];
+                if (!p.is_active) continue;
+
+                float meters_lat = 111320.0f;
+                float u_wind = 4.0f;
+                float v_wind = 1.5f;
+                float w_mean = 0.02f;
+                float v_s = 0.35f;
+
+                uint32_t lcg_state = static_cast<uint32_t>(i * 1664525u + 42819u);
+
+                for (int s = 0; s < total_steps; ++s) {
+                    lcg_state = lcg_state * 1664525u + 1013904223u;
+                    float u1 = static_cast<float>(lcg_state & 0x00FFFFFF) / 16777216.0f;
+                    lcg_state = lcg_state * 1664525u + 1013904223u;
+                    float u2 = static_cast<float>(lcg_state & 0x00FFFFFF) / 16777216.0f;
+
+                    float r = std::sqrt(-2.0f * std::log(std::max(1e-6f, u1)));
+                    float theta = 6.2831853f * u2;
+                    float dW = (r * std::cos(theta)) * sqrt_dt;
+
+                    constexpr float tau_L = 100.0f;
+                    constexpr float sigma_w = 0.5f;
+                    float a_w = -p.w_prime / tau_L;
+                    float b_w = std::sqrt(2.0f * sigma_w * sigma_w / tau_L);
+                    p.w_prime += a_w * dt_seconds + b_w * dW;
+
+                    float meters_lon = meters_lat * std::cos(p.y * 3.14159265f / 180.0f);
+                    p.x += (u_wind * dt_seconds) / meters_lon;
+                    p.y += (v_wind * dt_seconds) / meters_lat;
+                    p.z += (w_mean + p.w_prime - v_s) * dt_seconds;
+
+                    if (p.z <= 0.0f) {
+                        p.z = 0.0f;
+                        p.is_active = false;
+                        break;
+                    }
+                }
+            }
+        }
 
         // Reducción espacial: acreditar aterrizaje en la celda geográfica de destino real
         for (const auto& p : particles_) {

@@ -69,6 +69,14 @@ if(NOT OpenMP_FOUND)
         find_package(OpenMP REQUIRED)
     endif()
 endif()
+
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    # Rutas estándar de inclusión de OpenMP en LLVM/Clang
+    file(GLOB LLVM_OMP_INCLUDES "/usr/lib/llvm-*/include/openmp" "/usr/lib/llvm-*/include")
+    if(LLVM_OMP_INCLUDES)
+        include_directories(SYSTEM ${LLVM_OMP_INCLUDES})
+    endif()
+endif()
 find_package(PkgConfig REQUIRED)
 
 # 3.a NetCDF-C para tensores ERA5 3D
