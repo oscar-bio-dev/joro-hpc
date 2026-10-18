@@ -15,6 +15,7 @@ struct DispersionResult {
     
     float mean_jump_distance_km = 0.0f;
     float p95_jump_distance_km = 0.0f;
+    double kernel_time_s = 0.0; ///< Tiempo exclusivo de integración de trayectorias (GPU vs CPU)
 
     /// Matriz dispersa de llegadas por celda: cell_id -> número de propágulos depositados A_{i,t}
     std::unordered_map<int32_t, uint32_t> arrivals_per_cell;

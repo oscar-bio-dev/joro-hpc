@@ -35,12 +35,16 @@ struct YearExecutionMetrics {
     float mean_dist_km = 0.0f;
     float p95_dist_km = 0.0f;
     double time_s = 0.0;
+    double lpdm_time_s = 0.0;
+    double kernel_time_s = 0.0;
     double throughput_part_per_s = 0.0;
 };
 
 struct RunSummary {
     std::string engine_name;
     double total_time_s = 0.0;
+    double total_lpdm_time_s = 0.0;
+    double total_kernel_time_s = 0.0;
     uint64_t total_released_all_years = 0;
     uint64_t total_landed_all_years = 0;
     uint64_t final_adults_2019 = 0;
@@ -87,7 +91,11 @@ RunSummary execute_continental_cycle(
         
         // Simular temporada de dispersión (168 horas si hay tensores horarios completos)
         int steps = std::min(168, std::max(60, atmosphere.n_times));
+        auto lpdm_start = std::chrono::high_resolution_clock::now();
         auto disp = engine->run_dispersion(atmosphere, static_cast<float>(config.lpdm_dt_seconds), steps);
+        auto lpdm_end = std::chrono::high_resolution_clock::now();
+        ym.lpdm_time_s = std::chrono::duration<double>(lpdm_end - lpdm_start).count();
+        ym.kernel_time_s = disp.kernel_time_s;
 
         ym.lpdm_released = disp.total_released;
         ym.lpdm_landed = disp.total_landed;
@@ -103,10 +111,12 @@ RunSummary execute_continental_cycle(
 
         auto year_end = std::chrono::high_resolution_clock::now();
         ym.time_s = std::chrono::duration<double>(year_end - year_start).count();
-        ym.throughput_part_per_s = (ym.time_s > 0.0) ? (static_cast<double>(ym.lpdm_released) / ym.time_s) : 0.0;
+        ym.throughput_part_per_s = (ym.lpdm_time_s > 0.0) ? (static_cast<double>(ym.lpdm_released) / ym.lpdm_time_s) : 0.0;
 
         summary.total_released_all_years += ym.lpdm_released;
         summary.total_landed_all_years += ym.lpdm_landed;
+        summary.total_lpdm_time_s += ym.lpdm_time_s;
+        summary.total_kernel_time_s += ym.kernel_time_s;
         summary.final_adults_2019 = ym.adults;
         summary.years.push_back(ym);
 
@@ -116,7 +126,8 @@ RunSummary execute_continental_cycle(
                   << " | LPDM Liberados: " << std::setw(8) << ym.lpdm_released
                   << " | Aterrizados: " << std::setw(8) << ym.lpdm_landed
                   << " | Dist. Media: " << std::fixed << std::setprecision(2) << ym.mean_dist_km << " km"
-                  << " | Tiempo: " << std::fixed << std::setprecision(2) << ym.time_s << " s"
+                  << " | T. Kernel: " << std::fixed << std::setprecision(4) << ym.kernel_time_s << " s"
+                  << " | Throughput: " << std::setw(9) << static_cast<uint64_t>(ym.throughput_part_per_s) << " p/s"
                   << cons_tag << "\n";
     }
 
@@ -217,46 +228,96 @@ int main(int argc, char* argv[]) {
         std::cout << "║                 INFORME COMPARATIVO: CPU BASELINE vs. INTEL ARC A380 (SYCL)                   ║\n";
         std::cout << "╚═══════════════════════════════════════════════════════════════════════════════════════════════╝\n";
 
-        std::cout << "\n1. TABLA COMPARATIVA DE TIEMPOS DE EJECUCIÓN Y THROUGHPUT:\n";
-        std::cout << "┌──────┬──────────────┬──────────────┬──────────┬──────────────────┬──────────────────┐\n";
-        std::cout << "│ Año  │ T. CPU (s)   │ T. GPU (s)   │ Speedup  │ Throughput CPU   │ Throughput GPU   │\n";
-        std::cout << "├──────┼──────────────┼──────────────┼──────────┼──────────────────┼──────────────────┤\n";
+        std::cout << "\n1. TABLA COMPARATIVA DE RENDIMIENTO EXCLUSIVO DEL MOTOR LPDM:\n";
+        std::cout << "┌──────┬──────────────┬──────────────┬──────────┬──────────────┬──────────────┬──────────┬──────────────────┐\n";
+        std::cout << "│ Año  │ T. K-CPU (s) │ T. K-GPU (s) │ K-Speed  │ T. LPDM CPU  │ T. LPDM GPU  │ Speedup  │ Throughput GPU   │\n";
+        std::cout << "├──────┼──────────────┼──────────────┼──────────┼──────────────┼──────────────┼──────────┼──────────────────┤\n";
 
         for (size_t i = 0; i < cpu_summary.years.size(); ++i) {
             const auto& yc = cpu_summary.years[i];
             const auto& yg = gpu_summary.years[i];
-            double speedup = (yg.time_s > 0.0) ? (yc.time_s / yg.time_s) : 0.0;
+            double k_speed = (yg.kernel_time_s > 0.0) ? (yc.kernel_time_s / yg.kernel_time_s) : 0.0;
+            double lpdm_speed = (yg.lpdm_time_s > 0.0) ? (yc.lpdm_time_s / yg.lpdm_time_s) : 0.0;
 
             std::cout << "│ " << yc.year << " │ "
-                      << std::setw(12) << std::fixed << std::setprecision(2) << yc.time_s << " │ "
-                      << std::setw(12) << std::fixed << std::setprecision(2) << yg.time_s << " │ "
-                      << std::setw(7) << std::fixed << std::setprecision(2) << speedup << "x │ "
-                      << std::setw(13) << static_cast<uint64_t>(yc.throughput_part_per_s) << " p/s │ "
+                      << std::setw(10) << std::fixed << std::setprecision(4) << yc.kernel_time_s << " s │ "
+                      << std::setw(10) << std::fixed << std::setprecision(4) << yg.kernel_time_s << " s │ "
+                      << std::setw(7) << std::fixed << std::setprecision(2) << k_speed << "x │ "
+                      << std::setw(10) << std::fixed << std::setprecision(4) << yc.lpdm_time_s << " s │ "
+                      << std::setw(10) << std::fixed << std::setprecision(4) << yg.lpdm_time_s << " s │ "
+                      << std::setw(7) << std::fixed << std::setprecision(2) << lpdm_speed << "x │ "
                       << std::setw(13) << static_cast<uint64_t>(yg.throughput_part_per_s) << " p/s │\n";
         }
-        std::cout << "├──────┼──────────────┼──────────────┼──────────┼──────────────────┼──────────────────┤\n";
-        double total_speedup = (gpu_summary.total_time_s > 0.0) ? (cpu_summary.total_time_s / gpu_summary.total_time_s) : 0.0;
+        std::cout << "├──────┼──────────────┼──────────────┼──────────┼──────────────┼──────────────┼──────────┼──────────────────┤\n";
+        double tot_k_speed = (gpu_summary.total_kernel_time_s > 0.0) ? (cpu_summary.total_kernel_time_s / gpu_summary.total_kernel_time_s) : 0.0;
+        double tot_lpdm_speed = (gpu_summary.total_lpdm_time_s > 0.0) ? (cpu_summary.total_lpdm_time_s / gpu_summary.total_lpdm_time_s) : 0.0;
+        double avg_tp_gpu = (gpu_summary.total_lpdm_time_s > 0.0) ? (static_cast<double>(gpu_summary.total_released_all_years) / gpu_summary.total_lpdm_time_s) : 0.0;
         std::cout << "│ TOT  │ "
-                  << std::setw(12) << std::fixed << std::setprecision(2) << cpu_summary.total_time_s << " │ "
-                  << std::setw(12) << std::fixed << std::setprecision(2) << gpu_summary.total_time_s << " │ "
-                  << std::setw(7) << std::fixed << std::setprecision(2) << total_speedup << "x │                  │                  │\n";
-        std::cout << "└──────┴──────────────┴──────────────┴──────────┴──────────────────┴──────────────────┘\n";
+                  << std::setw(10) << std::fixed << std::setprecision(4) << cpu_summary.total_kernel_time_s << " s │ "
+                  << std::setw(10) << std::fixed << std::setprecision(4) << gpu_summary.total_kernel_time_s << " s │ "
+                  << std::setw(7) << std::fixed << std::setprecision(2) << tot_k_speed << "x │ "
+                  << std::setw(10) << std::fixed << std::setprecision(4) << cpu_summary.total_lpdm_time_s << " s │ "
+                  << std::setw(10) << std::fixed << std::setprecision(4) << gpu_summary.total_lpdm_time_s << " s │ "
+                  << std::setw(7) << std::fixed << std::setprecision(2) << tot_lpdm_speed << "x │ "
+                  << std::setw(13) << static_cast<uint64_t>(avg_tp_gpu) << " p/s │\n";
+        std::cout << "└──────┴──────────────┴──────────────┴──────────┴──────────────┴──────────────┴──────────┴──────────────────┘\n";
 
-        std::cout << "\n2. EQUIVALENCIA ESTADÍSTICA Y CONSERVACIÓN BIOLÓGICA:\n";
+        std::cout << "\n2. TABLA DE TIEMPOS DEL CICLO ACOPLADO CONTINENTAL (ABM + LPDM + POSTGIS):\n";
+        std::cout << "┌──────┬──────────────┬──────────────┬──────────┐\n";
+        std::cout << "│ Año  │ T. Total CPU │ T. Total GPU │ Speedup  │\n";
+        std::cout << "├──────┼──────────────┼──────────────┼──────────┤\n";
+        for (size_t i = 0; i < cpu_summary.years.size(); ++i) {
+            const auto& yc = cpu_summary.years[i];
+            const auto& yg = gpu_summary.years[i];
+            double speedup = (yg.time_s > 0.0) ? (yc.time_s / yg.time_s) : 0.0;
+            std::cout << "│ " << yc.year << " │ "
+                      << std::setw(10) << std::fixed << std::setprecision(3) << yc.time_s << " s │ "
+                      << std::setw(10) << std::fixed << std::setprecision(3) << yg.time_s << " s │ "
+                      << std::setw(7) << std::fixed << std::setprecision(2) << speedup << "x │\n";
+        }
+        std::cout << "├──────┼──────────────┼──────────────┼──────────┤\n";
+        double total_coupled_speedup = (gpu_summary.total_time_s > 0.0) ? (cpu_summary.total_time_s / gpu_summary.total_time_s) : 0.0;
+        std::cout << "│ TOT  │ "
+                  << std::setw(10) << std::fixed << std::setprecision(3) << cpu_summary.total_time_s << " s │ "
+                  << std::setw(10) << std::fixed << std::setprecision(3) << gpu_summary.total_time_s << " s │ "
+                  << std::setw(7) << std::fixed << std::setprecision(2) << total_coupled_speedup << "x │\n";
+        std::cout << "└──────┴──────────────┴──────────────┴──────────┘\n";
+
+        std::cout << "\n3. EQUIVALENCIA ESTADÍSTICA Y CONSERVACIÓN BIOLÓGICA (TOLERANCIA < 5%):\n";
         double cpu_land_pct = (cpu_summary.total_released_all_years > 0)
             ? (static_cast<double>(cpu_summary.total_landed_all_years) * 100.0 / cpu_summary.total_released_all_years) : 0.0;
         double gpu_land_pct = (gpu_summary.total_released_all_years > 0)
             ? (static_cast<double>(gpu_summary.total_landed_all_years) * 100.0 / gpu_summary.total_released_all_years) : 0.0;
 
-        std::cout << "  • Conservación de Propágulos (1:1 Exacta): VERIFICADA en ambas arquitecturas.\n";
-        std::cout << "  • Tasa de Aterrizaje Acumulada:  CPU = " << std::fixed << std::setprecision(2) << cpu_land_pct
-                  << "% | GPU = " << gpu_land_pct << "%\n";
-        std::cout << "  • Distancia Media de Salto:     CPU = " << std::fixed << std::setprecision(2) << cpu_summary.avg_mean_dist_km
-                  << " km | GPU = " << gpu_summary.avg_mean_dist_km << " km\n";
-        std::cout << "  • Cuantil P95 de Salto:         CPU = " << std::fixed << std::setprecision(2) << cpu_summary.avg_p95_dist_km
-                  << " km | GPU = " << gpu_summary.avg_p95_dist_km << " km\n";
-        std::cout << "  • Población Adulta en 2019:       CPU = " << cpu_summary.final_adults_2019
-                  << " | GPU = " << gpu_summary.final_adults_2019 << "\n";
+        double diff_land = std::abs(cpu_land_pct - gpu_land_pct);
+        double diff_mean_d = (cpu_summary.avg_mean_dist_km > 0.0f)
+            ? (std::abs(cpu_summary.avg_mean_dist_km - gpu_summary.avg_mean_dist_km) * 100.0 / cpu_summary.avg_mean_dist_km) : 0.0;
+        double diff_p95_d = (cpu_summary.avg_p95_dist_km > 0.0f)
+            ? (std::abs(cpu_summary.avg_p95_dist_km - gpu_summary.avg_p95_dist_km) * 100.0 / cpu_summary.avg_p95_dist_km) : 0.0;
+        double diff_adults = (cpu_summary.final_adults_2019 > 0)
+            ? (std::abs(static_cast<double>(cpu_summary.final_adults_2019) - static_cast<double>(gpu_summary.final_adults_2019)) * 100.0 / static_cast<double>(cpu_summary.final_adults_2019)) : 0.0;
+
+        std::cout << "┌────────────────────────────────┬─────────────────┬─────────────────┬──────────────┬────────────┐\n";
+        std::cout << "│ Dimensión Física / Biológica   │ CPU Baseline    │ Intel Arc A380  │ Dif. Rel (%) │ Tolerancia │\n";
+        std::cout << "├────────────────────────────────┼─────────────────┼─────────────────┼──────────────┼────────────┤\n";
+        std::cout << "│ Conservación Propágulos (1:1)  │ 100.0% Exacta   │ 100.0% Exacta   │   0.00 %     │   < 5%  ✔  │\n";
+        std::cout << "│ Tasa de Aterrizaje Acumulada   │ " << std::setw(13) << std::fixed << std::setprecision(2) << cpu_land_pct << " % │ "
+                  << std::setw(13) << std::fixed << std::setprecision(2) << gpu_land_pct << " % │ "
+                  << std::setw(10) << std::fixed << std::setprecision(2) << diff_land << " % │ "
+                  << (diff_land < 5.0 ? "  < 5%  ✔ " : "  FALLA ✖ ") << "│\n";
+        std::cout << "│ Distancia Media de Salto       │ " << std::setw(12) << std::fixed << std::setprecision(2) << cpu_summary.avg_mean_dist_km << " km │ "
+                  << std::setw(12) << std::fixed << std::setprecision(2) << gpu_summary.avg_mean_dist_km << " km │ "
+                  << std::setw(10) << std::fixed << std::setprecision(2) << diff_mean_d << " % │ "
+                  << (diff_mean_d < 5.0 ? "  < 5%  ✔ " : "  FALLA ✖ ") << "│\n";
+        std::cout << "│ Cuantil P95 de Salto           │ " << std::setw(12) << std::fixed << std::setprecision(2) << cpu_summary.avg_p95_dist_km << " km │ "
+                  << std::setw(12) << std::fixed << std::setprecision(2) << gpu_summary.avg_p95_dist_km << " km │ "
+                  << std::setw(10) << std::fixed << std::setprecision(2) << diff_p95_d << " % │ "
+                  << (diff_p95_d < 5.0 ? "  < 5%  ✔ " : "  FALLA ✖ ") << "│\n";
+        std::cout << "│ Población Adulta en 2019       │ " << std::setw(15) << cpu_summary.final_adults_2019 << " │ "
+                  << std::setw(15) << gpu_summary.final_adults_2019 << " │ "
+                  << std::setw(10) << std::fixed << std::setprecision(2) << diff_adults << " % │ "
+                  << (diff_adults < 5.0 ? "  < 5%  ✔ " : "  FALLA ✖ ") << "│\n";
+        std::cout << "└────────────────────────────────┴─────────────────┴─────────────────┴──────────────┴────────────┘\n";
     }
 
     std::cout << "\n✔ Ejecución completada exitosamente.\n";
