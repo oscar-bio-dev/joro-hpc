@@ -23,7 +23,7 @@ set(CMAKE_CXX_EXTENSIONS        OFF)
 # ─────────────────────────────────────────────────────────────────────────────
 # 2. Detección de compilador y banderas de aceleración
 # ─────────────────────────────────────────────────────────────────────────────
-option(JORO_ENABLE_AVX512 "Habilitar instrucciones AVX-512 (target Core i9-11900K / Rocket Lake)" OFF)
+option(JORO_ENABLE_AVX512 "Habilitar instrucciones AVX-512 (target Core i9-11900K / Rocket Lake)" ON)
 option(JORO_ENABLE_NATIVE "Habilitar optimizaciones de arquitectura del host (-march=native)" OFF)
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "IntelLLVM")
@@ -119,6 +119,7 @@ target_include_directories(joro_core PUBLIC
 target_compile_options(joro_core PUBLIC
     ${JORO_SYCL_FLAGS}
     ${JORO_OPENMP_FLAGS}
+    ${JORO_ARCH_FLAGS}
 )
 
 if(JORO_SYCL_FLAGS)

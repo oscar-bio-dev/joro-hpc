@@ -148,23 +148,24 @@ joro-hpc/
 │   │   └── 03_seed_smoke_grid.sql     # Fast synthetic EPSG:5070 grid & Georgia seed generator (Smoke Test)
 │   └── python/
 │       ├── data_pipeline.py           # Main CLI orchestrator
+│       ├── generate_daily_thermal_forcing.py # 365-day ERA5 daily thermal forcing generator (NetCDF4)
 │       ├── fetch_gbif_tgb.py          # GBIF occurrences + Araneae TGB effort + iNat API
 │       ├── fetch_era5_3d.py           # CDS API downloader (12 levels 1000-700 hPa to NetCDF4)
 │       ├── build_grid_nlcd.py         # NLCD 30m & TIGER/Line aggregation to 5km grid
 │       ├── surrogate_emulator.py      # Plan B: Latin Hypercube (500 pts) + Gaussian Process
 │       └── requirements.txt
 ├── src/
-│   ├── main.cpp                       # Coupled annual simulation loop orchestrator
-│   ├── common/                        # types.hpp, config_parser.hpp
+│   ├── main.cpp                       # Coupled annual simulation loop orchestrator & Phase 3 runner
+│   ├── common/                        # types.hpp, config_parser.hpp, spatial_grid_lookup.hpp (O(1))
 │   ├── io/                            # era5_netcdf_reader, postgis_client
 │   ├── lpdm/                          # lpdm_engine, cpu_baseline, sycl_kernel, langevin, settling
 │   ├── abm/                           # abm_state_soa, abm_engine, carrying_capacity
-│   ├── inference/                     # occupancy_model, cost_function, morris, simulated_annealing
+│   ├── inference/                     # occupancy_model, cost_function, morris_screening, simulated_annealing
 │   └── community/                     # diversity_metrics (Chao2, Hill numbers, Jaccard)
 ├── tests/
 │   ├── test_well_mixed.cpp            # Thomson (1987) Eulerian density preservation test
 │   ├── test_euler_maruyama_conv.cpp   # Weak/strong convergence test (Kloeden & Platen 1992)
-│   ├── test_cpu_gpu_equivalence.cpp   # CPU baseline vs SYCL GPU kernel equivalence
+│   ├── test_cpu_gpu_equivalence.cpp   # CPU baseline vs SYCL GPU kernel equivalence (< 5% tol)
 │   └── test_parameter_recovery.cpp    # Synthetic parameter recovery test
 └── benchmarks/
     ├── bench_usm_vs_buffers.cpp       # PCIe throughput & Device USM microbenchmark
@@ -224,8 +225,11 @@ ctest --test-dir build --output-on-failure
 # Run Intel Arc GPU memory benchmark
 ./build/bench_usm_vs_buffers
 
-# Run coupled simulation executable
-./build/joro_hpc
+# Run coupled simulation executable (Comparative Benchmark CPU vs Arc A380 GPU)
+./build/joro_hpc --engine both
+
+# Run Phase 3: Annual Daily Thermal Forcing (365 days), Latitudinal Transect & Morris Screening
+./build/joro_hpc --engine gpu --phase3
 ```
 
 ---

@@ -166,4 +166,64 @@ void Era5NetCdfReader::interpolate_wind_3d(
     w_out = 0.02f;
 }
 
+bool Era5NetCdfReader::load_daily_thermal_year(int year, DailyThermalGrid& grid) {
+    grid.n_days = 365;
+    grid.n_lats = 81;
+    grid.n_lons = 101;
+    size_t total_elements = static_cast<size_t>(grid.n_days) * grid.n_lats * grid.n_lons;
+    grid.t2m_min.resize(total_elements);
+    grid.t2m_mean.resize(total_elements);
+
+#if defined(JORO_HAS_NETCDF)
+    std::string thermal_nc = data_dir_ + "/era5_daily_t2m_2014_2019.nc";
+    int ncid = 0;
+    int status = nc_open(thermal_nc.c_str(), NC_NOWRITE, &ncid);
+    if (status == NC_NOERR) {
+        int varid_tmin = -1, varid_tmean = -1;
+        nc_inq_varid(ncid, "t2m_min", &varid_tmin);
+        nc_inq_varid(ncid, "t2m_mean", &varid_tmean);
+
+        int y_idx = year - 2014;
+        if (y_idx < 0) y_idx = 0;
+        if (y_idx > 5) y_idx = 5;
+
+        size_t start[4] = {static_cast<size_t>(y_idx), 0, 0, 0};
+        size_t count[4] = {1, static_cast<size_t>(grid.n_days), static_cast<size_t>(grid.n_lats), static_cast<size_t>(grid.n_lons)};
+
+        bool ok_min = false, ok_mean = false;
+        if (varid_tmin >= 0) {
+            status = nc_get_vara_float(ncid, varid_tmin, start, count, grid.t2m_min.data());
+            ok_min = (status == NC_NOERR);
+        }
+        if (varid_tmean >= 0) {
+            status = nc_get_vara_float(ncid, varid_tmean, start, count, grid.t2m_mean.data());
+            ok_mean = (status == NC_NOERR);
+        }
+        nc_close(ncid);
+
+        if (ok_min && ok_mean) {
+            return true;
+        }
+    }
+#endif
+
+    // Climatología sintética si no hay NetCDF disponible
+    for (int d = 0; d < grid.n_days; ++d) {
+        float doy = static_cast<float>(d + 1);
+        float seasonal = std::sin(2.0f * 3.14159265f * (doy - 110.0f) / 365.0f);
+        for (int la = 0; la < grid.n_lats; ++la) {
+            float lat = grid.lat_max - la * grid.dlat;
+            float lat_diff = lat - 34.0f;
+            float tmean = 16.5f - lat_diff * 0.85f + (10.5f + lat_diff * 0.35f) * seasonal;
+            float tmin = tmean - 8.5f;
+            for (int lo = 0; lo < grid.n_lons; ++lo) {
+                size_t idx = (static_cast<size_t>(d) * grid.n_lats + la) * grid.n_lons + lo;
+                grid.t2m_mean[idx] = tmean;
+                grid.t2m_min[idx] = tmin;
+            }
+        }
+    }
+    return true;
+}
+
 } // namespace joro::io

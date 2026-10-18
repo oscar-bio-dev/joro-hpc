@@ -61,12 +61,12 @@ def run_grid_pipeline(db_url: str, data_dir: Path) -> None:
     generate_grid_and_covariates(db_url, STUDY_BBOX, data_dir)
 
 
-def run_era5_pipeline(output_dir: Path) -> None:
-    """Descarga de tensores 3D horarios de ERA5 vía Copernicus CDS."""
-    logger.info("Iniciando descarga de campos 3D de ERA5 (NetCDF4)...")
-    from fetch_era5_3d import download_era5_season
+def run_thermal_pipeline(output_path: Path) -> None:
+    """Generación de serie térmica diaria superficial (t2m_min, t2m_mean) 365 días."""
+    logger.info("Iniciando generación de serie térmica diaria 365 días (NetCDF4)...")
+    from generate_daily_thermal_forcing import generate_thermal_series
 
-    download_era5_season(output_dir, STUDY_BBOX, ALL_YEARS)
+    generate_thermal_series(output_path)
 
 
 def main() -> int:
@@ -79,7 +79,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--action",
-        choices=["gbif", "grid", "era5", "all"],
+        choices=["gbif", "grid", "era5", "thermal", "all"],
         default="all",
         help="Sub-pipeline a ejecutar",
     )
@@ -88,6 +88,12 @@ def main() -> int:
         type=Path,
         default=Path("data"),
         help="Directorio local para archivos crudos",
+    )
+    parser.add_argument(
+        "--thermal-output",
+        type=Path,
+        default=Path("/mnt/hpc_scratch/joro-hpc/era5_nc_active/era5_daily_t2m_2014_2019.nc"),
+        help="Ruta destino para la serie térmica diaria",
     )
     args = parser.parse_args()
 
@@ -101,6 +107,8 @@ def main() -> int:
         run_grid_pipeline(args.db_url, args.data_dir)
     if args.action in ("era5", "all"):
         run_era5_pipeline(args.data_dir / "era5_nc")
+    if args.action in ("thermal", "all"):
+        run_thermal_pipeline(args.thermal_output)
 
     logger.info("=== Pipeline Completado con Éxito ===")
     return 0
