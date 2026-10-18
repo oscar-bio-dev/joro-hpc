@@ -37,6 +37,7 @@ struct ChainTelemetry {
     double cost_time_s = 0.0;          ///< Ocupación latente + detección + reducción del costo (OpenMP)
     uint64_t particles_dispatched = 0; ///< Super-partículas integradas en la GPU
     uint64_t cpu_fallbacks = 0;        ///< Despachos que NO se ejecutaron en la GPU (debe ser 0)
+    uint64_t capped_dispatches = 0;    ///< Despachos anuales con tope adaptativo de super-partículas aplicado
 
     [[nodiscard]] double lpdm_total_s() const noexcept {
         return lpdm_init_time_s + lpdm_h2d_time_s + lpdm_kernel_time_s + lpdm_d2h_time_s + lpdm_reduce_time_s;
@@ -83,6 +84,7 @@ struct CalibrationStratification {
     std::vector<double> envelope_radius_km;   ///< Radio de la envolvente por año (2014..2019)
     std::vector<double> observed_front_km;    ///< P95 observado de distancia al epicentro por año
     uint64_t effort_imputed_rows = 0;         ///< Filas con Y=1 cuyo esfuerzo se imputó (ver informe)
+    bool effort_synthetic = false;            ///< True si el esfuerzo TGB tiene la firma sintética (pocos valores distintos)
 };
 
 struct SimulatedAnnealingReport {

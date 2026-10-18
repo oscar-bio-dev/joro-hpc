@@ -28,21 +28,24 @@ struct EngineTelemetry {
     uint64_t dispatches = 0;            ///< Llamadas a run_dispersion con partículas
     uint64_t particles_dispatched = 0;  ///< Super-partículas integradas (excluye padding)
     uint64_t cpu_fallbacks = 0;         ///< Despachos que NO pudieron ejecutarse en GPU
-    double init_time_s = 0.0;           ///< Inicialización de partículas (host, OpenMP)
-    double h2d_time_s = 0.0;            ///< Copia host -> Device USM
-    double kernel_time_s = 0.0;         ///< Kernel SYCL parallel_for (integración de trayectorias)
-    double d2h_time_s = 0.0;            ///< Copia Device USM -> host
-    double reduce_time_s = 0.0;         ///< Reducción de aterrizajes (host, OpenMP + SpatialGridLookup)
+    double init_time_s = 0.0;           ///< Preparación de lotes de emisión (host)
+    double h2d_time_s = 0.0;            ///< Copia host -> Device USM (tabla compacta de celdas emisoras + puesta a cero)
+    double kernel_time_s = 0.0;         ///< Kernel SYCL parallel_for (integración de trayectorias + acumulación)
+    double d2h_time_s = 0.0;            ///< Copia Device USM -> host (llegadas por celda + parciales)
+    double reduce_time_s = 0.0;         ///< Reducción final en host (mapa de llegadas, estadísticos)
+    uint64_t capped_dispatches = 0;     ///< Despachos en los que el tope adaptativo escaló el peso de las super-partículas
 
     [[nodiscard]] EngineTelemetry operator-(const EngineTelemetry& o) const noexcept {
         return {dispatches - o.dispatches, particles_dispatched - o.particles_dispatched,
                 cpu_fallbacks - o.cpu_fallbacks, init_time_s - o.init_time_s, h2d_time_s - o.h2d_time_s,
-                kernel_time_s - o.kernel_time_s, d2h_time_s - o.d2h_time_s, reduce_time_s - o.reduce_time_s};
+                kernel_time_s - o.kernel_time_s, d2h_time_s - o.d2h_time_s, reduce_time_s - o.reduce_time_s,
+                capped_dispatches - o.capped_dispatches};
     }
     [[nodiscard]] double total_s() const noexcept {
         return init_time_s + h2d_time_s + kernel_time_s + d2h_time_s + reduce_time_s;
     }
 };
+
 
 class LpdmEngine {
 public:
@@ -67,6 +70,18 @@ public:
 
     /// Descripción legible del dispositivo (nombre, backend)
     [[nodiscard]] virtual std::string device_description() const { return "CPU (host)"; }
+
+    /// Carga el campo ERA5 (u, v, w, BLH, presión superficial) UNA sola vez; a partir de aquí
+    /// run_dispersion ignora el argumento `atmosphere` y usa el campo residente (Device USM en GPU).
+    /// Devuelve false si el campo no es utilizable (el motor sigue en modo de viento uniforme heredado).
+    virtual bool set_atmosphere(const io::AtmosphericField3D& /*atmosphere*/) { return false; }
+
+    /// True si hay un campo ERA5 residente que gobierna el transporte
+    [[nodiscard]] virtual bool is_atmosphere_resident() const noexcept { return false; }
+
+    /// Presupuesto máximo de super-partículas por despacho anual; si se excede, se reduce su número
+    /// y se escala su peso (la suma de pesos por celda se conserva exactamente). 0 = sin presupuesto.
+    virtual void set_max_super_particles(size_t /*budget*/) {}
 };
 
 /// Crea el motor de referencia en CPU (OpenMP SIMD)

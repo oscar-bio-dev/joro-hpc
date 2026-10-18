@@ -1,0 +1,15 @@
+Ventana de calibración: 25.9 s, 103 muestras (de 114)
+
+CPU (hilos lógicos: 16)
+  utilización media por hilo [%]:  99.1  99.1  99.1  99.2  99.9  99.1  99.1  99.1  99.2  99.1  99.1  99.1  99.1  99.1  99.1  99.1
+  media global 99.2 % | min 99.1 % | max 99.9 % | dispersión (max-min) 0.8 pp
+  muestras con los 16 hilos > 50 %: 102/103
+  utilización media de CPU por muestra: P50 100.0 % | max 100.0 %
+
+GPU Intel Arc A380 (motores del proceso, fdinfo DRM)
+  compute    media  68.3 % | P95  81.3 % | max  82.7 % | muestras activas (>1 %) 103/103
+  copy       media   4.0 % | P95   9.3 % | max  12.6 % | muestras activas (>1 %) 103/103
+  render     media   0.0 % | P95   0.0 % | max   0.0 % | muestras activas (>1 %) 0/103
+  video      media   0.0 % | P95   0.0 % | max   0.0 % | muestras activas (>1 %) 0/103
+  video-enhance media   0.0 % | P95   0.0 % | max   0.0 % | muestras activas (>1 %) 0/103
+  frecuencia actual: media 2415 MHz | max 2450 MHz

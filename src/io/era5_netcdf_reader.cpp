@@ -57,6 +57,13 @@ bool Era5NetCdfReader::load_month(int year, int month, AtmosphericField3D& field
             field.n_lons = static_cast<int>(n_lons);
             field.pressure_levels_hpa = {1000, 975, 950, 925, 900, 875, 850, 825, 800, 775, 750, 700};
 
+            // Coordenadas reales de la malla (el muestreador 3D las usa para indexar)
+            field.lats.assign(n_lats, 0.0f);
+            field.lons.assign(n_lons, 0.0f);
+            int varid_lat = -1, varid_lon = -1;
+            if (nc_inq_varid(ncid_3d, "latitude", &varid_lat) == NC_NOERR) nc_get_var_float(ncid_3d, varid_lat, field.lats.data());
+            if (nc_inq_varid(ncid_3d, "longitude", &varid_lon) == NC_NOERR) nc_get_var_float(ncid_3d, varid_lon, field.lons.data());
+
             size_t total_elements = n_times * n_levels * n_lats * n_lons;
             field.u.resize(total_elements);
             field.v.resize(total_elements);

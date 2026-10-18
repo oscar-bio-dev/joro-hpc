@@ -13,6 +13,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <omp.h>
 
@@ -56,6 +57,7 @@ ChainTelemetry operator-(const ChainTelemetry& a, const ChainTelemetry& b) {
     d.cost_time_s = a.cost_time_s - b.cost_time_s;
     d.particles_dispatched = a.particles_dispatched - b.particles_dispatched;
     d.cpu_fallbacks = a.cpu_fallbacks - b.cpu_fallbacks;
+    d.capped_dispatches = a.capped_dispatches - b.capped_dispatches;
     return d;
 }
 
@@ -115,15 +117,24 @@ PreparedCalibration prepare_calibration(
     cal.n_rows = obs.size();
     cal.strat.n_rows = obs.size();
 
-    // Normalización de covariables a [0,1] (H_i, R_i entran en logit(gamma) y logit(p))
-    float h_max = 0.0f, r_max = 0.0f;
-    for (const auto& o : obs) { h_max = std::max(h_max, o.pop_density_h); r_max = std::max(r_max, o.road_density_r); }
-    if (h_max <= 0.0f) h_max = 1.0f;
-    if (r_max <= 0.0f) r_max = 1.0f;
+    // Normalización de covariables a [0,1] (H_i, R_i entran en logit(gamma) y logit(p)).
+    // Las covariables de la BD están estandarizadas (media 0), así que se escala min-max.
+    float h_min = 1e30f, h_max = -1e30f, r_min = 1e30f, r_max = -1e30f;
+    for (const auto& o : obs) {
+        h_min = std::min(h_min, o.pop_density_h); h_max = std::max(h_max, o.pop_density_h);
+        r_min = std::min(r_min, o.road_density_r); r_max = std::max(r_max, o.road_density_r);
+    }
+    const float h_span = (h_max - h_min) > 0.0f ? (h_max - h_min) : 1.0f;
+    const float r_span = (r_max - r_min) > 0.0f ? (r_max - r_min) : 1.0f;
+    if (obs.empty()) { h_min = r_min = 0.0f; }
 
-    // Esfuerzo TGB por año: mediana del esfuerzo en filas SIN detección (fondo). En las filas con
-    // detección el valor almacenado por la ingesta es una cota inferior max(n_joro, 3), no un conteo
-    // TGB, y se imputa con la mediana del fondo del mismo año (en memoria; la BD no se modifica).
+    // Esfuerzo TGB: si el esfuerzo almacenado tiene la firma del valor sintético (muy pocos valores
+    // distintos: constante 238 en el fondo y cota max(n_joro, 3) en las detecciones), se imputa en las
+    // filas con detección la mediana del fondo del mismo año (solo en memoria). Con esfuerzo TGB real
+    // (conteos de Araneae de GBIF) no se modifica ningún valor.
+    std::unordered_set<int32_t> distinct_effort;
+    for (const auto& o : obs) distinct_effort.insert(o.effort_araneae);
+    const bool synthetic_effort = distinct_effort.size() < 8;
     std::array<int32_t, kNYears> median_effort{};
     for (int yi = 0; yi < kNYears; ++yi) {
         std::vector<int32_t> bg;
@@ -135,6 +146,7 @@ PreparedCalibration prepare_calibration(
             median_effort[yi] = 1;
         }
     }
+    cal.strat.effort_synthetic = synthetic_effort;
 
     // Slots densos del estado latente
     std::unordered_map<int32_t, int32_t> slot_of;
@@ -183,10 +195,10 @@ PreparedCalibration prepare_calibration(
             const int32_t s = slot_of[o.cell_id];
             cal.cell_id[r] = o.cell_id;
             cal.slot[r] = s;
-            cal.h_norm[r] = o.pop_density_h / h_max;
+            cal.h_norm[r] = (o.pop_density_h - h_min) / h_span;
             int32_t effort = o.effort_araneae;
-            if (o.y_detected == 1) { effort = median_effort[yi]; cal.strat.effort_imputed_rows++; }
-            cal.p_det[r] = compute_detection_prob(effort, o.pop_density_h / h_max, o.road_density_r / r_max);
+            if (synthetic_effort && o.y_detected == 1) { effort = median_effort[yi]; cal.strat.effort_imputed_rows++; }
+            cal.p_det[r] = compute_detection_prob(effort, (o.pop_density_h - h_min) / h_span, (o.road_density_r - r_min) / r_span);
 
             const double d_km = dist_to_epicenter_km(o.centroid_lat, o.centroid_lon);
             const uint8_t yprev = last_y[s];
@@ -221,7 +233,7 @@ struct EvalContext {
     const std::vector<io::DailyThermalGrid>* thermal = nullptr;
     const PreparedCalibration* cal = nullptr;
     lpdm::LpdmEngine* lpdm = nullptr;
-    io::AtmosphericField3D atmo;           // El kernel SYCL no lee este campo (viento uniforme interno)
+    io::AtmosphericField3D atmo;           // Se ignora: el campo ERA5 reside en el motor (set_atmosphere), cargado una sola vez
     std::vector<float> epi_dist_km;        // distancia al epicentro por posición de celda
 
     std::vector<float> psi;
@@ -372,6 +384,7 @@ ChainTelemetry snapshot(const EvalContext& ctx) {
     t.lpdm_reduce_time_s = e.reduce_time_s;
     t.particles_dispatched = e.particles_dispatched;
     t.cpu_fallbacks = e.cpu_fallbacks;
+    t.capped_dispatches = e.capped_dispatches;
     return t;
 }
 
@@ -515,7 +528,10 @@ SimulatedAnnealingReport run_multi_start_simulated_annealing(
         for (double r : s.envelope_radius_km) std::cout << " " << std::fixed << std::setprecision(1) << r;
         std::cout << "\n[Calibración] Frente observado P95 por año [km]:";
         for (double f : s.observed_front_km) std::cout << " " << std::fixed << std::setprecision(1) << f;
-        std::cout << "\n[Calibración] Esfuerzo imputado en " << s.effort_imputed_rows << " filas con detección (ver informe)\n";
+        std::cout << "\n[Calibración] Esfuerzo TGB: " << (s.effort_synthetic ? "SINTÉTICO detectado -> imputado en " + std::to_string(s.effort_imputed_rows) + " filas con detección"
+                                                                            : std::string("conteos reales de Araneae (sin imputación)")) << "\n";
+        std::cout << "[Calibración] Transporte LPDM: " << (lpdm_engine->is_atmosphere_resident() ? "viento/BLH ERA5 residentes en el dispositivo"
+                                                                                          : "viento uniforme heredado (ERA5 NO cargado)") << "\n";
     }
 
     abm::CellIndexTable cidx = abm::CellIndexTable::build(grid_cells);

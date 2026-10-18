@@ -443,6 +443,12 @@ int main(int argc, char* argv[]) {
         }
         std::cout << "[ERA5] Series térmicas diarias 2014–2019 cargadas (una grilla por año).\n";
 
+        // Tensores ERA5 3D (u, v, w, BLH, sp) -> Device USM UNA sola vez; el kernel SYCL interpola el viento real.
+        if (!lpdm_gpu->set_atmosphere(atmosphere)) {
+            std::cerr << "[Fase 4] Error: el campo ERA5 no es utilizable para el transporte LPDM.\n";
+            return EXIT_FAILURE;
+        }
+
         // Las 5 cadenas se ejecutan secuencialmente; cada evaluación usa la GPU (LPDM) y todos los hilos OpenMP.
         joro::inference::SimulatedAnnealingReport sa_report;
         int sa_chains = 5, sa_iters = 400; // Configuración oficial: 5 x 400 = 2,000 evaluaciones
@@ -586,6 +592,12 @@ int main(int argc, char* argv[]) {
             const double tmean = tsum / static_cast<double>(sa_report.chains.size());
             std::cout << "  ✔ Despachos GPU: " << std::setprecision(0) << static_cast<double>(tt.evaluations) << " evaluaciones | despachos con fallback a CPU: "
                       << tt.cpu_fallbacks << "\n";
+            std::cout << "  ✔ Despachos anuales con tope adaptativo de super-partículas: " << tt.capped_dispatches << " de "
+                      << static_cast<double>(tt.evaluations) * 6.0 << "\n";
+            std::cout << "  ✔ Fracción de pared: H2D+D2H " << std::setprecision(1)
+                      << (sa_report.total_runtime_s > 0.0 ? 100.0 * (tt.lpdm_h2d_time_s + tt.lpdm_d2h_time_s) / sa_report.total_runtime_s : 0.0)
+                      << " % | kernel GPU "
+                      << (sa_report.total_runtime_s > 0.0 ? 100.0 * tt.lpdm_kernel_time_s / sa_report.total_runtime_s : 0.0) << " %\n";
             std::cout << "  ✔ Throughput del kernel GPU: " << std::setprecision(2) << kern_mps_steps << " M part-pasos/s (60 pasos de 60 s)\n";
             std::cout << "  ✔ Balance entre cadenas: min " << std::setprecision(2) << tmin << " s | media " << tmean << " s | max " << tmax
                       << " s | max/min = " << (tmin > 0.0 ? tmax / tmin : 0.0) << "\n";

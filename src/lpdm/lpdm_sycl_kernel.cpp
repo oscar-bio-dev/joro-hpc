@@ -1,35 +1,49 @@
 #include "lpdm/lpdm_engine.hpp"
-#include "lpdm/langevin_turbulence.hpp"
+#include "lpdm/lpdm_trace.hpp"
 #include "lpdm/settling_velocity.hpp"
 #include "common/spatial_grid_lookup.hpp"
-#include <iostream>
-#include <cmath>
-#include <random>
 #include <algorithm>
-#include <memory>
 #include <chrono>
+#include <cmath>
+#include <cstdlib>
+#include <iostream>
+#include <memory>
+#include <stdexcept>
 
 #if defined(JORO_HAS_SYCL)
 #include <sycl/sycl.hpp>
 #endif
 
-#if defined(_OPENMP)
-  #if defined(__has_include)
-    #if __has_include(<omp.h>)
-      #include <omp.h>
-      #define JORO_HAS_OMP_HEADER 1
-    #endif
-  #else
-    #include <omp.h>
-    #define JORO_HAS_OMP_HEADER 1
-  #endif
-#endif
-
 namespace joro::lpdm {
 
+namespace {
+
+constexpr uint32_t kMaxSuperPerCell = 25000;       ///< Tope por celda (heredado)
+constexpr size_t kDefaultMaxSuperPerDispatch = 120000; ///< Presupuesto adaptativo por despacho anual
+constexpr uint64_t kMaxPropagules = 4000000000ull; ///< Los contadores de llegada son uint32
+#if defined(JORO_HAS_SYCL)
+constexpr size_t kWgSize = 128;
+#endif
+
+using Clock = std::chrono::steady_clock;
+inline double seconds_since(Clock::time_point t0) {
+    return std::chrono::duration<double>(Clock::now() - t0).count();
+}
+
+} // namespace
+
+/// Motor LPDM sobre GPU (SYCL / Level-Zero) con bucle de partículas "zero-copy":
+///  * al dispositivo solo viaja la tabla compacta de celdas emisoras (EmissionJob, ~24 B por celda);
+///  * cada work-item toma su super-partícula, integra la trayectoria completa en registros
+///    (Philox 4x32-10 por hilo), localiza la celda de aterrizaje con el SpatialGridLookup alojado en
+///    Device USM y acumula con atomic_ref en d_arrivals_[cell_id];
+///  * al terminar solo regresa el arreglo compacto de llegadas (1 uint32 por celda) y unos parciales.
 class LpdmSyclEngine : public LpdmEngine {
 public:
     LpdmSyclEngine() {
+        if (const char* env = std::getenv("JORO_MAX_SUPER")) {
+            max_super_ = static_cast<size_t>(std::strtoull(env, nullptr, 10));
+        }
 #if defined(JORO_HAS_SYCL)
         try {
             sycl::device dev;
@@ -56,26 +70,53 @@ public:
 #endif
     }
 
-    ~LpdmSyclEngine() override {
+    ~LpdmSyclEngine() override { free_device(); }
+
+    void set_max_super_particles(size_t budget) override { max_super_ = budget; }
+
+    bool set_atmosphere(const io::AtmosphericField3D& atmosphere) override {
+        const auto t0 = Clock::now();
+        Era5Pack pack;
+        if (!pack.build(atmosphere)) return false;
+        era5_host_ = std::move(pack);
+        era5_host_.refresh_view();
 #if defined(JORO_HAS_SYCL)
-        if (d_particles_ && q_) {
+        if (q_) {
             try {
-                sycl::free(d_particles_, *q_);
-            } catch (...) {}
-            d_particles_ = nullptr;
-            d_capacity_ = 0;
+                free_atmosphere_device();
+                d_wind_ = sycl::malloc_device<Wind4>(era5_host_.wind.size(), *q_);
+                d_blh_ = sycl::malloc_device<float>(era5_host_.blh.size(), *q_);
+                d_zg_ = sycl::malloc_device<float>(era5_host_.zground.size(), *q_);
+                if (!d_wind_ || !d_blh_ || !d_zg_) throw std::runtime_error("sin memoria de dispositivo para ERA5");
+                q_->memcpy(d_wind_, era5_host_.wind.data(), era5_host_.wind.size() * sizeof(Wind4));
+                q_->memcpy(d_blh_, era5_host_.blh.data(), era5_host_.blh.size() * sizeof(float));
+                q_->memcpy(d_zg_, era5_host_.zground.data(), era5_host_.zground.size() * sizeof(float)).wait();
+            } catch (const std::exception& e) {
+                std::cerr << "[SYCL Note] No se pudo subir ERA5 al dispositivo (" << e.what()
+                          << "); el transporte usará el campo en host.\n";
+                free_atmosphere_device();
+            }
         }
 #endif
+        atmosphere_resident_ = true;
+        std::cout << "  [ERA5->USM] Campo atmosférico residente: " << era5_host_.view.n_t << " h x "
+                  << era5_host_.view.n_lev << " niveles x " << era5_host_.view.n_lat << " x " << era5_host_.view.n_lon
+                  << " | " << (static_cast<double>(era5_host_.bytes()) / 1.048576e6) << " MB"
+                  << (d_wind_ ? " en Device USM" : " en host") << " | carga única "
+                  << seconds_since(t0) << " s\n";
+        return true;
     }
+
+    [[nodiscard]] bool is_atmosphere_resident() const noexcept override { return atmosphere_resident_; }
 
     void initialize_particles(
         const std::vector<GridCell>& cells,
-        const std::unordered_map<int32_t, uint32_t>& propagules_per_cell) override 
+        const std::unordered_map<int32_t, uint32_t>& propagules_per_cell) override
     {
-        const auto t_init0 = std::chrono::steady_clock::now();
+        const auto t_init0 = Clock::now();
 
-        // La malla (256k celdas) solo se copia/indexa cuando cambia: el SpatialGridLookup y la tabla
-        // cell_id -> posición se reutilizan en las miles de evaluaciones de una calibración.
+        // La malla (256k celdas) solo se copia/indexa cuando cambia: el SpatialGridLookup, la tabla
+        // cell_id -> posición y su copia en Device USM se reutilizan en toda una calibración.
         const bool same_grid =
             !cells_.empty() && cells.size() == cells_.size() && cells.data() == grid_ptr_ &&
             cells.front().cell_id == cells_.front().cell_id &&
@@ -88,65 +129,61 @@ public:
             spatial_lookup_.build(cells_);
             int32_t max_id = -1;
             for (const auto& c : cells_) max_id = std::max(max_id, c.cell_id);
-            cell_pos_.assign(static_cast<size_t>(max_id + 1), -1);
+            n_ids_ = static_cast<size_t>(max_id + 1);
+            cell_pos_.assign(n_ids_, -1);
             for (size_t i = 0; i < cells_.size(); ++i) {
                 if (cells_[i].cell_id >= 0) cell_pos_[static_cast<size_t>(cells_[i].cell_id)] = static_cast<int32_t>(i);
             }
+            h_arrivals_.assign(n_ids_, 0u);
+            upload_grid();
         }
 
-        constexpr uint32_t MAX_PARTICLES_PER_CELL = 25000;
-
-        // Un trabajo por celda emisora; el orden por posición en la malla reproduce exactamente
-        // el orden de recorrido original (y por tanto la semilla de cada super-partícula).
-        struct Job { size_t pos; uint32_t total; uint32_t n_sim; size_t offset; };
-        std::vector<Job> jobs;
-        jobs.reserve(propagules_per_cell.size());
+        struct Tmp { size_t pos; uint32_t total; uint32_t n_sim; };
+        std::vector<Tmp> tmp;
+        tmp.reserve(propagules_per_cell.size());
+        uint64_t sum_total = 0, sum_sim = 0;
         for (const auto& [cid, cnt] : propagules_per_cell) {
             if (cnt == 0) continue;
             const int32_t pos = (cid >= 0 && static_cast<size_t>(cid) < cell_pos_.size())
                                     ? cell_pos_[static_cast<size_t>(cid)] : -1;
             if (pos < 0) continue;
-            jobs.push_back({static_cast<size_t>(pos), cnt, std::min(cnt, MAX_PARTICLES_PER_CELL), 0});
+            const uint32_t n_sim = std::min(cnt, kMaxSuperPerCell);
+            tmp.push_back({static_cast<size_t>(pos), cnt, n_sim});
+            sum_total += cnt;
+            sum_sim += n_sim;
         }
-        std::sort(jobs.begin(), jobs.end(), [](const Job& a, const Job& b) { return a.pos < b.pos; });
+        if (sum_total > kMaxPropagules) {
+            throw std::runtime_error("LPDM: más de 4e9 propágulos en un despacho; los contadores de llegada son uint32.");
+        }
+        std::sort(tmp.begin(), tmp.end(), [](const Tmp& a, const Tmp& b) { return a.pos < b.pos; });
 
-        size_t total_particles = 0;
-        for (auto& j : jobs) { j.offset = total_particles; total_particles += j.n_sim; }
-
-        particles_.clear();
-        particles_.resize(total_particles);
-
-        #pragma omp parallel for schedule(dynamic, 16) if(total_particles > 4096)
-        for (size_t jb = 0; jb < jobs.size(); ++jb) {
-            const Job& job = jobs[jb];
-            const GridCell& cell = cells_[job.pos];
-            const uint32_t base_weight = job.total / job.n_sim;
-            const uint32_t remainder = job.total % job.n_sim;
-
-            // Generador para inyección convectiva idéntico al motor CPU
-            std::mt19937 init_rng(84920 + cell.cell_id);
-            std::uniform_real_distribution<float> takeoff_z(30.0f, 250.0f);
-            std::uniform_real_distribution<float> takeoff_w(0.35f, 0.50f);
-
-            for (uint32_t i = 0; i < job.n_sim; ++i) {
-                Particle3D& p = particles_[job.offset + i];
-                p.x = cell.centroid_lon;
-                p.y = cell.centroid_lat;
-                p.origin_x = cell.centroid_lon;
-                p.origin_y = cell.centroid_lat;
-                p.z = takeoff_z(init_rng); // Altura de entrada al régimen de baloneo libre
-                p.w_prime = takeoff_w(init_rng); // Impulso convectivo ascendente inicial (w'_0 > vs ~0.295 m/s)
-                p.mass_mg = 0.6f;          // Juvenil ninfal de mayo
-                p.silk_length_m = 1.2f;    // Línea de baloneo
-                p.posture_chi = 0.85f;
-                // Partición entera exacta: suma total de pesos en la celda == total_props
-                p.weight = static_cast<float>(base_weight + (i < remainder ? 1 : 0));
-                p.origin_cell = cell.cell_id;
-                p.is_active = true;
+        // Tope adaptativo: si el despacho excede el presupuesto de super-partículas, se reduce su
+        // número por celda y su peso crece (total/n_sim); la suma de pesos por celda sigue siendo exacta.
+        last_capped_ = false;
+        if (max_super_ > 0 && sum_sim > max_super_) {
+            const double f = static_cast<double>(max_super_) / static_cast<double>(sum_sim);
+            sum_sim = 0;
+            for (auto& t : tmp) {
+                const uint32_t scaled = static_cast<uint32_t>(std::ceil(static_cast<double>(t.n_sim) * f));
+                t.n_sim = std::max<uint32_t>(1u, std::min(t.n_sim, scaled));
+                sum_sim += t.n_sim;
             }
+            last_capped_ = true;
+            tel_.capped_dispatches++;
         }
 
-        tel_.init_time_s += std::chrono::duration<double>(std::chrono::steady_clock::now() - t_init0).count();
+        jobs_.clear();
+        jobs_.reserve(tmp.size());
+        uint32_t offset = 0;
+        for (const auto& t : tmp) {
+            const GridCell& c = cells_[t.pos];
+            jobs_.push_back(EmissionJob{c.cell_id, c.centroid_lon, c.centroid_lat, t.total, t.n_sim, offset});
+            offset += t.n_sim;
+        }
+        total_sim_ = offset;
+        total_props_ = sum_total;
+
+        tel_.init_time_s += seconds_since(t_init0);
     }
 
     [[nodiscard]] EngineTelemetry telemetry() const override { return tel_; }
@@ -156,287 +193,335 @@ public:
     DispersionResult run_dispersion(
         const io::AtmosphericField3D& /*atmosphere*/,
         float dt_seconds,
-        int total_steps) override 
+        int total_steps) override
     {
         DispersionResult result;
-        if (particles_.empty()) return result;
+        if (jobs_.empty()) return result;
 
         tel_.dispatches++;
-        tel_.particles_dispatched += particles_.size();
+        tel_.particles_dispatched += total_sim_;
 
+        TraceParams tp;
+        tp.dt = dt_seconds;
+        tp.sqrt_dt = std::sqrt(dt_seconds);
+        tp.steps = total_steps;
+        tp.vs_aero = compute_settling_velocity(0.6f, 1.2f, 0.85f); // ~0.2947 m/s
+
+        uint64_t landed_w = 0, escaped_w = 0;
+        double sum_wd = 0.0;
+        std::vector<uint32_t> hist(kDistHistBins, 0u);
         bool offload_succeeded = false;
-        const float vs_aero = compute_settling_velocity(0.6f, 1.2f, 0.85f); // ~0.2947 m/s
 
 #if defined(JORO_HAS_SYCL)
         if (q_) {
             try {
                 auto& q = *q_;
-                const size_t n_particles = particles_.size();
-
-                // Alinear al tamaño de work-group en GPU (ej. 64) mediante dummy padding inactivo
-                constexpr size_t WG_SIZE = 64;
-                const size_t padded_size = ((n_particles + WG_SIZE - 1) / WG_SIZE) * WG_SIZE;
-
-                if (padded_size > d_capacity_) {
-                    if (d_particles_) sycl::free(d_particles_, q);
-                    d_capacity_ = std::max<size_t>(padded_size + padded_size / 2, size_t{1} << 20);
-                    d_particles_ = sycl::malloc_device<Particle3D>(d_capacity_, q);
+                const size_t n_jobs = jobs_.size();
+                const size_t n_wg = (static_cast<size_t>(total_sim_) + kWgSize - 1) / kWgSize;
+                ensure_job_buffers(n_jobs, q);
+                ensure_result_buffers(n_wg, q);
+                if (!d_jobs_ || !h_jobs_pin_ || !d_res_ || !h_res_ || !d_grid_) {
+                    throw std::runtime_error("asignación en Device USM fallida");
                 }
 
-                if (padded_size > n_particles) {
-                    particles_.resize(padded_size);
-                    for (size_t i = n_particles; i < padded_size; ++i) {
-                        particles_[i].weight = 0.0f;
-                        particles_[i].is_active = false;
-                        particles_[i].origin_cell = 0;
-                    }
+                // Bloque de resultados contiguo en el dispositivo: [llegadas | histograma | parciales por work-group].
+                // Así el regreso a host es UNA sola copia DMA sobre memoria anclada (pinned).
+                const size_t words_cleared = n_ids_ + static_cast<size_t>(kDistHistBins);
+                uint32_t* d_arrivals = d_res_;
+                uint32_t* d_hist = d_res_ + n_ids_;
+                uint32_t* wg_land = d_hist + kDistHistBins;
+                uint32_t* wg_esc = wg_land + n_wg;
+                float* wg_swd = reinterpret_cast<float*>(wg_esc + n_wg);
+                const size_t res_words = words_cleared + 3 * n_wg;
+
+                // H2D: solo la tabla compacta de celdas emisoras (< 1 MB, vía memoria anclada) + puesta a cero de acumuladores
+                const auto t_h2d0 = Clock::now();
+                std::memcpy(h_jobs_pin_, jobs_.data(), n_jobs * sizeof(EmissionJob));
+                q.memcpy(d_jobs_, h_jobs_pin_, n_jobs * sizeof(EmissionJob));
+                q.memset(d_res_, 0, words_cleared * sizeof(uint32_t));
+                q.wait();
+                tel_.h2d_time_s += seconds_since(t_h2d0);
+
+                TraceParams dtp = tp;
+                dtp.grid = SpatialGridView{grid_view_host_.min_lon, grid_view_host_.min_lat, grid_view_host_.inv_cell,
+                                           grid_view_host_.n_cols, grid_view_host_.n_rows, d_grid_};
+                if (atmosphere_resident_ && d_wind_) {
+                    dtp.atm = era5_host_.view;
+                    dtp.atm.wind = d_wind_;
+                    dtp.atm.blh = d_blh_;
+                    dtp.atm.zground = d_zg_;
+                } else if (atmosphere_resident_) {
+                    throw std::runtime_error("ERA5 no residente en el dispositivo");
                 }
 
-                // Transferencia a GPU (Device USM) sin copia intermedia en host
-                Particle3D* d_particles = d_particles_;
-                const auto t_h2d0 = std::chrono::steady_clock::now();
-                q.memcpy(d_particles, particles_.data(), padded_size * sizeof(Particle3D)).wait();
-                tel_.h2d_time_s += std::chrono::duration<double>(std::chrono::steady_clock::now() - t_h2d0).count();
+                const EmissionJob* jobs = d_jobs_;
+                const uint32_t n_jobs_u = static_cast<uint32_t>(n_jobs);
+                const uint32_t total_sim = total_sim_;
 
-                const float sqrt_dt = std::sqrt(dt_seconds);
-                constexpr float deg_to_rad = 3.14159265f / 180.0f;
-                constexpr float rad_to_deg = 180.0f / 3.14159265f;
-                constexpr float R_earth = 6371000.0f;
-
-                // 1 solo q.submit por lote anual con el bucle temporal completo dentro del kernel
-                auto k_start = std::chrono::high_resolution_clock::now();
+                const auto k_start = Clock::now();
                 q.submit([&](sycl::handler& cgh) {
-                    cgh.parallel_for(sycl::nd_range<1>(padded_size, WG_SIZE), [=](sycl::nd_item<1> item) {
-                        size_t idx = item.get_global_id(0);
-                        if (idx >= n_particles) return;
+                    sycl::local_accessor<uint32_t, 1> lhist(sycl::range<1>(kDistHistBins), cgh);
+                    cgh.parallel_for(
+                        sycl::nd_range<1>(n_wg * kWgSize, kWgSize),
+                        [=](sycl::nd_item<1> item) {
+                            const size_t lid = item.get_local_id(0);
+                            const uint32_t gid = static_cast<uint32_t>(item.get_global_id(0));
 
-                        Particle3D& p = d_particles[idx];
-                        if (!p.is_active || p.weight <= 0.0f) return;
+                            for (size_t b = lid; b < static_cast<size_t>(kDistHistBins); b += kWgSize) lhist[b] = 0u;
+                            sycl::group_barrier(item.get_group());
 
-                        float u_wind = 4.0f;
-                        float v_wind = 1.5f;
-                        float w_mean = 0.02f;
-
-                        // Estado LCG por partícula
-                        uint32_t lcg_state = static_cast<uint32_t>(idx * 1664525u + 42819u);
-
-                        for (int s = 0; s < total_steps; ++s) {
-                            float sim_time_s = s * dt_seconds;
-                            // Ciclo diurno convectivo en la CLP (térmicas de ascenso)
-                            float diurnal_phase = sycl::sin(2.0f * 3.14159265f * (sim_time_s / 86400.0f));
-                            float w_convective = (diurnal_phase > 0.0f) ? (0.20f * diurnal_phase) : 0.0f;
-
-                            // Generador pseudoaleatorio uniforme en GPU
-                            lcg_state = lcg_state * 1664525u + 1013904223u;
-                            float u1 = static_cast<float>(lcg_state & 0x00FFFFFF) / 16777216.0f;
-                            lcg_state = lcg_state * 1664525u + 1013904223u;
-                            float u2 = static_cast<float>(lcg_state & 0x00FFFFFF) / 16777216.0f;
-
-                            // Transformada Box-Muller para variable normal estándar N(0, 1)
-                            float r = sycl::sqrt(-2.0f * sycl::log(sycl::max(1e-6f, u1)));
-                            float theta = 6.2831853f * u2;
-                            float dW = (r * sycl::cos(theta)) * sqrt_dt;
-
-                            // Turbulencia vertical de Langevin (Well-Mixed)
-                            constexpr float tau_L = 100.0f;
-                            constexpr float sigma_w = 0.5f;
-                            float a_w = -p.w_prime / tau_L;
-                            float b_w = sycl::sqrt(2.0f * sigma_w * sigma_w / tau_L);
-                            p.w_prime += a_w * dt_seconds + b_w * dW;
-
-                            // Cinemática esférica exacta:
-                            float cos_lat = sycl::max(0.01f, sycl::cos(p.y * deg_to_rad));
-                            float d_lon = (u_wind * dt_seconds / (R_earth * cos_lat)) * rad_to_deg;
-                            float d_lat = (v_wind * dt_seconds / R_earth) * rad_to_deg;
-
-                            p.x += d_lon;
-                            p.y += d_lat;
-                            p.z += (w_mean + w_convective + p.w_prime - vs_aero) * dt_seconds;
-
-                            // Techo de capa límite reflectante
-                            if (p.z > 1200.0f) {
-                                p.z = 2400.0f - p.z;
-                                p.w_prime = -p.w_prime;
+                            uint32_t w_land = 0, w_esc = 0;
+                            float swd = 0.0f;
+                            if (gid < total_sim) {
+                                // Lote al que pertenece esta super-partícula (búsqueda binaria por offset)
+                                uint32_t lo = 0, hi = n_jobs_u - 1;
+                                while (lo < hi) {
+                                    const uint32_t mid = (lo + hi + 1) >> 1;
+                                    if (jobs[mid].offset <= gid) lo = mid; else hi = mid - 1;
+                                }
+                                const EmissionJob job = jobs[lo];
+                                const TraceResult r = trace_super_particle(dtp, job, gid - job.offset);
+                                if (r.landed) {
+                                    w_land = r.weight;
+                                    swd = static_cast<float>(r.weight) * r.dist_km;
+                                    int bin = static_cast<int>(r.dist_km * (1.0f / kDistHistBinKm));
+                                    bin = bin < kDistHistBins ? bin : kDistHistBins - 1;
+                                    sycl::atomic_ref<uint32_t, sycl::memory_order::relaxed,
+                                                     sycl::memory_scope::work_group,
+                                                     sycl::access::address_space::local_space>(lhist[bin])
+                                        .fetch_add(r.weight);
+                                    if (r.dest_cell >= 0) {
+                                        sycl::atomic_ref<uint32_t, sycl::memory_order::relaxed,
+                                                         sycl::memory_scope::device,
+                                                         sycl::access::address_space::global_space>(
+                                            d_arrivals[r.dest_cell])
+                                            .fetch_add(r.weight);
+                                    } else {
+                                        w_esc = r.weight;
+                                    }
+                                } else {
+                                    w_esc = r.weight; // sigue en suspensión al terminar la ventana
+                                }
                             }
+                            sycl::group_barrier(item.get_group());
 
-                            // Frontera inferior absorbente (Aterrizaje en vegetación/suelo)
-                            if (p.z <= 0.0f) {
-                                p.z = 0.0f;
-                                p.is_active = false;
-                                break;
+                            for (size_t b = lid; b < static_cast<size_t>(kDistHistBins); b += kWgSize) {
+                                const uint32_t v = lhist[b];
+                                if (v != 0u) {
+                                    sycl::atomic_ref<uint32_t, sycl::memory_order::relaxed,
+                                                     sycl::memory_scope::device,
+                                                     sycl::access::address_space::global_space>(d_hist[b])
+                                        .fetch_add(v);
+                                }
                             }
-                        }
-                    });
+                            const auto grp = item.get_group();
+                            const uint32_t s_land = sycl::reduce_over_group(grp, w_land, sycl::plus<uint32_t>());
+                            const uint32_t s_esc = sycl::reduce_over_group(grp, w_esc, sycl::plus<uint32_t>());
+                            const float s_swd = sycl::reduce_over_group(grp, swd, sycl::plus<float>());
+                            if (lid == 0) {
+                                const size_t g = item.get_group_linear_id();
+                                wg_land[g] = s_land;
+                                wg_esc[g] = s_esc;
+                                wg_swd[g] = s_swd;
+                            }
+                        });
                 }).wait();
-                auto k_end = std::chrono::high_resolution_clock::now();
-                result.kernel_time_s = std::chrono::duration<double>(k_end - k_start).count();
+                result.kernel_time_s = seconds_since(k_start);
                 tel_.kernel_time_s += result.kernel_time_s;
 
-                const auto t_d2h0 = std::chrono::steady_clock::now();
-                q.memcpy(particles_.data(), d_particles_, n_particles * sizeof(Particle3D)).wait();
-                tel_.d2h_time_s += std::chrono::duration<double>(std::chrono::steady_clock::now() - t_d2h0).count();
-                particles_.resize(n_particles);
-                offload_succeeded = true;
+                // D2H: UNA copia anclada del bloque compacto (n_ids x 4 B ≈ 1 MB + histograma + parciales)
+                const auto t_d2h0 = Clock::now();
+                q.memcpy(h_res_, d_res_, res_words * sizeof(uint32_t)).wait();
+                tel_.d2h_time_s += seconds_since(t_d2h0);
 
+                const auto t_red0 = Clock::now();
+                const uint32_t* h_hist = h_res_ + n_ids_;
+                const uint32_t* h_land = h_hist + kDistHistBins;
+                const uint32_t* h_esc = h_land + n_wg;
+                const float* h_swd = reinterpret_cast<const float*>(h_esc + n_wg);
+                std::copy(h_hist, h_hist + kDistHistBins, hist.begin());
+                for (size_t g = 0; g < n_wg; ++g) {
+                    landed_w += h_land[g];
+                    escaped_w += h_esc[g];
+                    sum_wd += static_cast<double>(h_swd[g]);
+                }
+                tel_.reduce_time_s += seconds_since(t_red0);
+                offload_succeeded = true;
             } catch (const sycl::exception& e) {
                 std::cerr << "[SYCL Note] Dispositivo SYCL error (" << e.what()
                           << "). Ejecutando fallback local en CPU.\n";
-                offload_succeeded = false;
+            } catch (const std::runtime_error& e) {
+                std::cerr << "[SYCL Note] " << e.what() << ". Ejecutando fallback local en CPU.\n";
             }
         }
 #endif
 
         if (!offload_succeeded) {
             tel_.cpu_fallbacks++;
-            const float sqrt_dt = std::sqrt(dt_seconds);
-            constexpr float deg_to_rad = 3.14159265f / 180.0f;
-            constexpr float rad_to_deg = 180.0f / 3.14159265f;
-            constexpr float R_earth = 6371000.0f;
-
-            for (size_t i = 0; i < particles_.size(); ++i) {
-                auto& p = particles_[i];
-                if (!p.is_active || p.weight <= 0.0f) continue;
-
-                float u_wind = 4.0f;
-                float v_wind = 1.5f;
-                float w_mean = 0.02f;
-
-                uint32_t lcg_state = static_cast<uint32_t>(i * 1664525u + 42819u);
-
-                for (int s = 0; s < total_steps; ++s) {
-                    float sim_time_s = s * dt_seconds;
-                    float diurnal_phase = std::sin(2.0f * 3.14159265f * (sim_time_s / 86400.0f));
-                    float w_convective = (diurnal_phase > 0.0f) ? (0.20f * diurnal_phase) : 0.0f;
-
-                    lcg_state = lcg_state * 1664525u + 1013904223u;
-                    float u1 = static_cast<float>(lcg_state & 0x00FFFFFF) / 16777216.0f;
-                    lcg_state = lcg_state * 1664525u + 1013904223u;
-                    float u2 = static_cast<float>(lcg_state & 0x00FFFFFF) / 16777216.0f;
-
-                    float r = std::sqrt(-2.0f * std::log(std::max(1e-6f, u1)));
-                    float theta = 6.2831853f * u2;
-                    float dW = (r * std::cos(theta)) * sqrt_dt;
-
-                    constexpr float tau_L = 100.0f;
-                    constexpr float sigma_w = 0.5f;
-                    float a_w = -p.w_prime / tau_L;
-                    float b_w = std::sqrt(2.0f * sigma_w * sigma_w / tau_L);
-                    p.w_prime += a_w * dt_seconds + b_w * dW;
-
-                    float cos_lat = std::max(0.01f, std::cos(p.y * deg_to_rad));
-                    float d_lon = (u_wind * dt_seconds / (R_earth * cos_lat)) * rad_to_deg;
-                    float d_lat = (v_wind * dt_seconds / R_earth) * rad_to_deg;
-
-                    p.x += d_lon;
-                    p.y += d_lat;
-                    p.z += (w_mean + w_convective + p.w_prime - vs_aero) * dt_seconds;
-
-                    if (p.z > 1200.0f) {
-                        p.z = 2400.0f - p.z;
-                        p.w_prime = -p.w_prime;
-                    }
-                    if (p.z <= 0.0f) {
-                        p.z = 0.0f;
-                        p.is_active = false;
-                        break;
-                    }
+            landed_w = escaped_w = 0;
+            sum_wd = 0.0;
+            std::fill(hist.begin(), hist.end(), 0u);
+            std::fill(h_arrivals_.begin(), h_arrivals_.end(), 0u);
+            TraceParams htp = tp;
+            htp.grid = spatial_lookup_.view();
+            if (atmosphere_resident_) htp.atm = era5_host_.view;
+            const auto k_start = Clock::now();
+            const int64_t n = static_cast<int64_t>(total_sim_);
+            const int64_t n_jobs = static_cast<int64_t>(jobs_.size());
+            uint64_t land_acc = 0, esc_acc = 0;
+            double swd_acc = 0.0;
+            #pragma omp parallel for schedule(static) reduction(+ : land_acc, esc_acc, swd_acc)
+            for (int64_t gid = 0; gid < n; ++gid) {
+                int64_t lo = 0, hi = n_jobs - 1;
+                while (lo < hi) {
+                    const int64_t mid = (lo + hi + 1) >> 1;
+                    if (static_cast<int64_t>(jobs_[static_cast<size_t>(mid)].offset) <= gid) lo = mid; else hi = mid - 1;
                 }
-            }
-        }
-
-        // Reducción espacial multihilo O(1) con SpatialGridLookup
-        const auto t_red0 = std::chrono::steady_clock::now();
-        constexpr double deg_to_rad_red = 3.141592653589793 / 180.0;
-        constexpr double R_earth_red = 6371000.0;
-        result.arrivals_per_cell.reserve(4096);
-        std::vector<float> landed_distances_km;
-        landed_distances_km.reserve(particles_.size());
-
-        uint64_t total_released_acc = 0;
-        uint64_t total_landed_acc = 0;
-        uint64_t total_escaped_acc = 0;
-
-        #pragma omp parallel
-        {
-            std::vector<float> local_distances;
-            local_distances.reserve(particles_.size() / 8);
-            std::unordered_map<int32_t, uint32_t> local_arrivals;
-            local_arrivals.reserve(256);
-
-            uint64_t loc_rel = 0;
-            uint64_t loc_land = 0;
-            uint64_t loc_esc = 0;
-
-            #pragma omp for schedule(static)
-            for (size_t i = 0; i < particles_.size(); ++i) {
-                const auto& p = particles_[i];
-                if (p.weight <= 0.0f) continue; // Descartar dummy padding
-                uint32_t w = static_cast<uint32_t>(std::round(p.weight));
-                loc_rel += w;
-
-                double mid_lat = 0.5 * (p.origin_y + p.y) * deg_to_rad_red;
-                double dx_m = (p.x - p.origin_x) * deg_to_rad_red * R_earth_red * std::cos(mid_lat);
-                double dy_m = (p.y - p.origin_y) * deg_to_rad_red * R_earth_red;
-                float dist_km = static_cast<float>(std::sqrt(dx_m * dx_m + dy_m * dy_m) / 1000.0);
-
-                if (!p.is_active) {
-                    loc_land += w;
-                    local_distances.push_back(dist_km);
-
-                    int32_t dest_cell_id = spatial_lookup_.find_cell(p.x, p.y);
-                    if (dest_cell_id != -1) {
-                        local_arrivals[dest_cell_id] += w;
+                const EmissionJob& job = jobs_[static_cast<size_t>(lo)];
+                const TraceResult r = trace_super_particle(htp, job, static_cast<uint32_t>(gid - job.offset));
+                if (r.landed) {
+                    land_acc += r.weight;
+                    swd_acc += static_cast<double>(r.weight) * r.dist_km;
+                    int bin = static_cast<int>(r.dist_km * (1.0f / kDistHistBinKm));
+                    bin = bin < kDistHistBins ? bin : kDistHistBins - 1;
+                    #pragma omp atomic
+                    hist[static_cast<size_t>(bin)] += r.weight;
+                    if (r.dest_cell >= 0) {
+                        #pragma omp atomic
+                        h_arrivals_[static_cast<size_t>(r.dest_cell)] += r.weight;
                     } else {
-                        loc_esc += w;
+                        esc_acc += r.weight;
                     }
                 } else {
-                    loc_esc += w;
+                    esc_acc += r.weight;
                 }
             }
+            landed_w = land_acc;
+            escaped_w = esc_acc;
+            sum_wd = swd_acc;
+            result.kernel_time_s = seconds_since(k_start);
+            tel_.kernel_time_s += result.kernel_time_s;
+        }
 
-            #pragma omp critical
-            {
-                total_released_acc += loc_rel;
-                total_landed_acc += loc_land;
-                total_escaped_acc += loc_esc;
-                landed_distances_km.insert(landed_distances_km.end(), local_distances.begin(), local_distances.end());
-                for (const auto& [cid, count] : local_arrivals) {
-                    result.arrivals_per_cell[cid] += count;
-                }
+        // Reducción final en host: mapa disperso de llegadas + estadísticos de salto
+        const auto t_red0 = Clock::now();
+        result.total_released = total_props_;
+        result.total_landed = landed_w;
+        result.total_escaped = escaped_w;
+        result.arrivals_per_cell.reserve(4096);
+        const uint32_t* arr = offload_succeeded ? h_res_ : h_arrivals_.data();
+        for (size_t id = 0; id < n_ids_; ++id) {
+            if (arr[id] != 0u) result.arrivals_per_cell[static_cast<int32_t>(id)] = arr[id];
+        }
+        if (landed_w > 0) {
+            result.mean_jump_distance_km = static_cast<float>(sum_wd / static_cast<double>(landed_w));
+            const uint64_t target = static_cast<uint64_t>(std::ceil(0.95 * static_cast<double>(landed_w)));
+            uint64_t cum = 0;
+            int p95_bin = kDistHistBins - 1;
+            for (int b = 0; b < kDistHistBins; ++b) {
+                cum += hist[static_cast<size_t>(b)];
+                if (cum >= target) { p95_bin = b; break; }
             }
+            result.p95_jump_distance_km = (static_cast<float>(p95_bin) + 0.5f) * kDistHistBinKm;
         }
-
-        result.total_released = total_released_acc;
-        result.total_landed = total_landed_acc;
-        result.total_escaped = total_escaped_acc;
-        tel_.reduce_time_s += std::chrono::duration<double>(std::chrono::steady_clock::now() - t_red0).count();
-
-        if (!landed_distances_km.empty()) {
-            double sum_d = 0.0;
-            for (float d : landed_distances_km) sum_d += d;
-            result.mean_jump_distance_km = static_cast<float>(sum_d / landed_distances_km.size());
-            size_t p95_idx = static_cast<size_t>(landed_distances_km.size() * 0.95);
-            if (p95_idx >= landed_distances_km.size()) p95_idx = landed_distances_km.size() - 1;
-            std::nth_element(landed_distances_km.begin(), landed_distances_km.begin() + p95_idx, landed_distances_km.end());
-            result.p95_jump_distance_km = landed_distances_km[p95_idx];
-        }
-
+        tel_.reduce_time_s += seconds_since(t_red0);
         return result;
     }
 
 private:
+#if defined(JORO_HAS_SYCL)
+    void ensure_job_buffers(size_t n, sycl::queue& q) {
+        if (n <= cap_jobs_ && d_jobs_ && h_jobs_pin_) return;
+        if (d_jobs_) sycl::free(d_jobs_, q);
+        if (h_jobs_pin_) sycl::free(h_jobs_pin_, q);
+        cap_jobs_ = std::max<size_t>(n + n / 2, 1024);
+        d_jobs_ = sycl::malloc_device<EmissionJob>(cap_jobs_, q);
+        h_jobs_pin_ = sycl::malloc_host<EmissionJob>(cap_jobs_, q);
+    }
+
+    void ensure_result_buffers(size_t n_wg, sycl::queue& q) {
+        if (n_wg <= cap_wg_ && d_res_ && h_res_) return;
+        if (d_res_) sycl::free(d_res_, q);
+        if (h_res_) sycl::free(h_res_, q);
+        cap_wg_ = std::max<size_t>(n_wg + n_wg / 2, 1024);
+        const size_t words = n_ids_ + static_cast<size_t>(kDistHistBins) + 3 * cap_wg_;
+        d_res_ = sycl::malloc_device<uint32_t>(words, q);
+        h_res_ = sycl::malloc_host<uint32_t>(words, q);
+    }
+
+    void free_atmosphere_device() {
+        if (!q_) return;
+        if (d_wind_) { sycl::free(d_wind_, *q_); d_wind_ = nullptr; }
+        if (d_blh_) { sycl::free(d_blh_, *q_); d_blh_ = nullptr; }
+        if (d_zg_) { sycl::free(d_zg_, *q_); d_zg_ = nullptr; }
+    }
+#endif
+
+    void upload_grid() {
+        grid_view_host_ = spatial_lookup_.view();
+#if defined(JORO_HAS_SYCL)
+        if (!q_) return;
+        try {
+            const auto& raw = spatial_lookup_.raw_grid();
+            if (d_grid_) sycl::free(d_grid_, *q_);
+            d_grid_ = sycl::malloc_device<int32_t>(raw.size(), *q_);
+            q_->memcpy(d_grid_, raw.data(), raw.size() * sizeof(int32_t)).wait();
+            if (d_res_) { sycl::free(d_res_, *q_); d_res_ = nullptr; }
+            if (h_res_) { sycl::free(h_res_, *q_); h_res_ = nullptr; }
+            cap_wg_ = 0;
+        } catch (const sycl::exception& e) {
+            std::cerr << "[SYCL Note] No se pudo subir el SpatialGridLookup a Device USM (" << e.what() << ")\n";
+            d_grid_ = nullptr;
+        }
+#endif
+    }
+
+    void free_device() {
+#if defined(JORO_HAS_SYCL)
+        if (!q_) return;
+        try {
+            free_atmosphere_device();
+            if (d_grid_) sycl::free(d_grid_, *q_);
+            if (d_jobs_) sycl::free(d_jobs_, *q_);
+            if (h_jobs_pin_) sycl::free(h_jobs_pin_, *q_);
+            if (d_res_) sycl::free(d_res_, *q_);
+            if (h_res_) sycl::free(h_res_, *q_);
+        } catch (...) {}
+        d_grid_ = nullptr; d_jobs_ = nullptr; h_jobs_pin_ = nullptr; d_res_ = nullptr; h_res_ = nullptr;
+#endif
+    }
+
     std::vector<GridCell> cells_;
     const GridCell* grid_ptr_ = nullptr;
-    std::vector<int32_t> cell_pos_;   ///< cell_id -> posición en cells_ (-1 si no existe)
-    std::vector<Particle3D> particles_;
+    std::vector<int32_t> cell_pos_;       ///< cell_id -> posición en cells_ (-1 si no existe)
+    size_t n_ids_ = 0;                    ///< max(cell_id) + 1 (tamaño del arreglo de llegadas)
     SpatialGridLookup spatial_lookup_;
+    SpatialGridView grid_view_host_;
+
+    std::vector<EmissionJob> jobs_;       ///< Tabla compacta de celdas emisoras del despacho
+    uint32_t total_sim_ = 0;              ///< Super-partículas del despacho
+    uint64_t total_props_ = 0;            ///< Propágulos reales del despacho (Σ pesos)
+    size_t max_super_ = kDefaultMaxSuperPerDispatch;
+    bool last_capped_ = false;
+
+    std::vector<uint32_t> h_arrivals_;    ///< Llegadas en host (solo ruta de respaldo CPU)
+    uint32_t* h_res_ = nullptr;           ///< Bloque de resultados anclado (pinned) para la copia D2H única
+    EmissionJob* h_jobs_pin_ = nullptr;   ///< Tabla de celdas emisoras en memoria anclada (staging H2D)
+
+    Era5Pack era5_host_;
+    bool atmosphere_resident_ = false;
+
     EngineTelemetry tel_;
     bool is_gpu_ = false;
     std::string device_desc_ = "SYCL no disponible (fallback CPU)";
 #if defined(JORO_HAS_SYCL)
     std::unique_ptr<sycl::queue> q_;
-    Particle3D* d_particles_ = nullptr;
-    size_t d_capacity_ = 0;
+    int32_t* d_grid_ = nullptr;
+    EmissionJob* d_jobs_ = nullptr;       size_t cap_jobs_ = 0;
+    uint32_t* d_res_ = nullptr;           size_t cap_wg_ = 0;  ///< [llegadas | histograma | parciales WG]
+    Wind4* d_wind_ = nullptr;
+    float* d_blh_ = nullptr;
+    float* d_zg_ = nullptr;
 #endif
 };
 

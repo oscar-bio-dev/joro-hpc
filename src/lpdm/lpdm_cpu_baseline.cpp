@@ -2,6 +2,7 @@
 #include "lpdm/langevin_turbulence.hpp"
 #include "lpdm/settling_velocity.hpp"
 #include "common/spatial_grid_lookup.hpp"
+#include "lpdm/era5_view.hpp"
 #include <random>
 #include <iostream>
 #include <algorithm>
@@ -23,6 +24,17 @@ namespace joro::lpdm {
 
 class LpdmCpuBaseline : public LpdmEngine {
 public:
+    bool set_atmosphere(const io::AtmosphericField3D& atmosphere) override {
+        Era5Pack pack;
+        if (!pack.build(atmosphere)) return false;
+        era5_ = std::move(pack);
+        era5_.refresh_view();
+        atmosphere_resident_ = true;
+        return true;
+    }
+
+    [[nodiscard]] bool is_atmosphere_resident() const noexcept override { return atmosphere_resident_; }
+
     void initialize_particles(
         const std::vector<GridCell>& cells,
         const std::unordered_map<int32_t, uint32_t>& propagules_per_cell) override 
@@ -86,6 +98,7 @@ public:
 
         // Velocidad de sedimentación biológica exacta para Trichonephila clavata (~0.295 m/s)
         const float vs_aero = compute_settling_velocity(0.6f, 1.2f, 0.85f);
+        const Era5View atm = atmosphere_resident_ ? era5_.view : Era5View{};
 
         auto k_start = std::chrono::high_resolution_clock::now();
         #pragma omp parallel
@@ -96,11 +109,20 @@ public:
             std::mt19937 rng(42819);
             #endif
             std::normal_distribution<float> normal_dist(0.0f, 1.0f);
+            std::uniform_real_distribution<float> unif01_dist(0.0f, 1.0f);
+            auto unif01 = [&](std::mt19937& g) { return unif01_dist(g); };
 
             #pragma omp for schedule(guided)
             for (size_t i = 0; i < particles_.size(); ++i) {
                 auto& p = particles_[i];
                 if (!p.is_active) continue;
+
+                // Hora de liberación dentro de la ventana ERA5 (igual que el kernel GPU)
+                float t0_h = 0.0f;
+                if (atm.valid) {
+                    const float span = static_cast<float>(atm.n_t - 1) - static_cast<float>(total_steps) * dt_seconds / 3600.0f;
+                    t0_h = span > 0.0f ? span * unif01(rng) : 0.0f;
+                }
 
                 for (int step = 0; step < total_steps; ++step) {
                     float sim_time_s = step * dt_seconds;
@@ -108,13 +130,19 @@ public:
                     float diurnal_phase = std::sin(2.0f * static_cast<float>(M_PI) * (sim_time_s / 86400.0f));
                     float w_convective = (diurnal_phase > 0.0f) ? (0.20f * diurnal_phase) : 0.0f;
 
-                    // Viento advectivo medio horizontal y vertical sinóptico
+                    // Viento advectivo medio horizontal y vertical sinóptico (ERA5 residente o uniforme heredado)
                     float u_wind = 4.0f;
                     float v_wind = 1.5f;
                     float w_mean = 0.02f;
+                    float blh = 1200.0f;
+                    if (atm.valid) {
+                        float b = 0.0f;
+                        atm.sample(p.x, p.y, p.z, t0_h + sim_time_s / 3600.0f, u_wind, v_wind, w_mean, b);
+                        blh = std::clamp(b, 250.0f, 3000.0f);
+                    }
 
                     // Turbulencia vertical de Langevin
-                    auto lang = compute_langevin_well_mixed(p.w_prime, p.z, 1200.0f);
+                    auto lang = compute_langevin_well_mixed(p.w_prime, p.z, blh);
                     float dW = normal_dist(rng) * sqrt_dt;
                     p.w_prime += lang.a_w * dt_seconds + lang.b_w * dW;
 
@@ -128,8 +156,8 @@ public:
                     p.z += (w_mean + w_convective + p.w_prime - vs_aero) * dt_seconds;
 
                     // Techo de capa límite reflectante
-                    if (p.z > 1200.0f) {
-                        p.z = 2400.0f - p.z;
+                    if (p.z > blh) {
+                        p.z = 2.0f * blh - p.z;
                         p.w_prime = -p.w_prime;
                     }
 
@@ -147,7 +175,7 @@ public:
 
         // Reducción espacial multihilo O(1) con SpatialGridLookup
         result.arrivals_per_cell.reserve(4096);
-        std::vector<float> landed_distances_km;
+        std::vector<std::pair<float, uint32_t>> landed_distances_km; // (distancia, propágulos representados)
         landed_distances_km.reserve(particles_.size());
 
         uint64_t total_released_acc = 0;
@@ -156,7 +184,7 @@ public:
 
         #pragma omp parallel
         {
-            std::vector<float> local_distances;
+            std::vector<std::pair<float, uint32_t>> local_distances;
             local_distances.reserve(particles_.size() / 8);
             std::unordered_map<int32_t, uint32_t> local_arrivals;
             local_arrivals.reserve(256);
@@ -179,7 +207,7 @@ public:
 
                 if (!p.is_active) {
                     loc_land += w;
-                    local_distances.push_back(dist_km);
+                    local_distances.emplace_back(dist_km, w);
 
                     int32_t dest_cell_id = spatial_lookup_.find_cell(p.x, p.y);
                     if (dest_cell_id != -1) {
@@ -209,13 +237,19 @@ public:
         result.total_escaped = total_escaped_acc;
 
         if (!landed_distances_km.empty()) {
-            double sum_d = 0.0;
-            for (float d : landed_distances_km) sum_d += d;
-            result.mean_jump_distance_km = static_cast<float>(sum_d / landed_distances_km.size());
-            size_t p95_idx = static_cast<size_t>(landed_distances_km.size() * 0.95);
-            if (p95_idx >= landed_distances_km.size()) p95_idx = landed_distances_km.size() - 1;
-            std::nth_element(landed_distances_km.begin(), landed_distances_km.begin() + p95_idx, landed_distances_km.end());
-            result.p95_jump_distance_km = landed_distances_km[p95_idx];
+            double sum_wd = 0.0;
+            double sum_w = 0.0;
+            for (const auto& [d, w] : landed_distances_km) { sum_wd += static_cast<double>(d) * w; sum_w += w; }
+            result.mean_jump_distance_km = static_cast<float>(sum_wd / sum_w);
+            std::sort(landed_distances_km.begin(), landed_distances_km.end(),
+                      [](const auto& a, const auto& b) { return a.first < b.first; });
+            const double target = 0.95 * sum_w;
+            double cum = 0.0;
+            result.p95_jump_distance_km = landed_distances_km.back().first;
+            for (const auto& [d, w] : landed_distances_km) {
+                cum += w;
+                if (cum >= target) { result.p95_jump_distance_km = d; break; }
+            }
         }
 
         return result;
@@ -225,6 +259,8 @@ private:
     std::vector<GridCell> cells_;
     std::vector<Particle3D> particles_;
     SpatialGridLookup spatial_lookup_;
+    Era5Pack era5_;
+    bool atmosphere_resident_ = false;
 };
 
 std::unique_ptr<LpdmEngine> create_cpu_baseline_engine() {

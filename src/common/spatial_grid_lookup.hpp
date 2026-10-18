@@ -7,9 +7,47 @@
 
 namespace joro {
 
+/// Vista POD (trivialmente copiable) del índice espacial: usable en host y dentro de kernels SYCL.
+/// `grid` apunta a memoria host o Device USM con n_cols * n_rows valores de cell_id (-1 = vacío).
+struct SpatialGridView {
+    float min_lon = 0.0f;
+    float min_lat = 0.0f;
+    float inv_cell = 0.0f;
+    int n_cols = 0;
+    int n_rows = 0;
+    const int32_t* grid = nullptr;
+
+    [[nodiscard]] inline int32_t find(float lon, float lat) const noexcept {
+        const int base_col = static_cast<int>((lon - min_lon) * inv_cell);
+        const int base_row = static_cast<int>((lat - min_lat) * inv_cell);
+        if (base_col >= 0 && base_col < n_cols && base_row >= 0 && base_row < n_rows) {
+            const int32_t cid = grid[static_cast<size_t>(base_row) * n_cols + base_col];
+            if (cid != -1) return cid;
+        }
+        for (int dr = -1; dr <= 1; ++dr) {
+            const int r = base_row + dr;
+            if (r < 0 || r >= n_rows) continue;
+            for (int dc = -1; dc <= 1; ++dc) {
+                const int c = base_col + dc;
+                if (c < 0 || c >= n_cols) continue;
+                const int32_t cid = grid[static_cast<size_t>(r) * n_cols + c];
+                if (cid != -1) return cid;
+            }
+        }
+        return -1;
+    }
+};
+
 /// Índice espacial 2D O(1) para mapeo ultrarrápido de coordenadas (lon, lat) a cell_id
 class SpatialGridLookup {
 public:
+    /// Vista sobre el buffer propio del índice (host)
+    [[nodiscard]] SpatialGridView view() const noexcept {
+        return SpatialGridView{min_lon_, min_lat_, inv_cell_size_, n_cols_, n_rows_, grid_.data()};
+    }
+    /// Contenido crudo del índice (para copiarlo a Device USM)
+    [[nodiscard]] const std::vector<int32_t>& raw_grid() const noexcept { return grid_; }
+
     void build(const std::vector<GridCell>& cells) {
         if (cells.empty()) return;
 
