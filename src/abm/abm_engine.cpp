@@ -238,14 +238,12 @@ DemographyYearSummary AbmEngine::step_summer_autumn_phenology(
         float q10_f = std::clamp(std::pow(params_.q10, (t_mean_fall - params_.t_ref) / 10.0f), 0.2f, 3.0f);
         float f_eff = params_.fecundity_F * q10_f;
 
-        // Ecuación canónica de regulación de Sección 8:
-        // mu_B = F(T) * N * max(0, 1 - N / K_i) * q_viab
-        // Para dinámica de cohortes estables con semelparidad anual:
-        float density_damping = std::max(0.0f, 1.0f - (n_adults / k_i));
-        float mu_b = f_eff * 0.5f * n_adults * density_damping * params_.q_viab;
-
-        // Respaldo de saturación asintótica (Beverton-Holt): no superar K_i
-        mu_b = std::min(mu_b, k_i * 1.5f);
+        // Ecuación canónica de regulación denso-dependiente asintótica de Beverton-Holt (Sección 8):
+        // mu_B = (R0 * N) / (1 + ((R0 - 1) / K_i) * N)
+        // Garantiza convergencia monótona hacia K_i sin extinciones artificiales de ciclo-2
+        // incluso si una inmigración aérea masiva puntual produce N_{i,t} > K_i.
+        const float r0 = f_eff * 0.5f * params_.q_viab;
+        const float mu_b = (r0 * n_adults) / (1.0f + ((r0 - 1.0f) / k_i) * n_adults);
 
         if (mu_b > 0.0f) {
             new_egg_sacs_per_cell[cell_id] = mu_b;
@@ -382,6 +380,8 @@ DemographyYearSummary AbmEngine::step_annual_cycle(
 
     // 2. Reproducción local denso-dependiente
     std::unordered_map<int32_t, float> local_recruits_per_cell;
+    double sum_sat = 0.0;
+    int n_occupied = 0;
 
     for (const auto& cell : cells) {
         float n_adults = summary.adult_density_per_cell[cell.cell_id];
@@ -398,6 +398,9 @@ DemographyYearSummary AbmEngine::step_annual_cycle(
         float fecundity_eff = params_.fecundity_F * q10_factor;
 
         float k_i = compute_carrying_capacity(cell, cc);
+        sum_sat += (n_adults / k_i);
+        n_occupied++;
+
         const float r0 = fecundity_eff * 0.5f * params_.q_viab;
         const float mu_b = (r0 * n_adults) / (1.0f + ((r0 - 1.0f) / k_i) * n_adults);
         if (mu_b <= 0.0f) continue;
@@ -428,6 +431,10 @@ DemographyYearSummary AbmEngine::step_annual_cycle(
         if (local_count > 0.0f) {
             cohorts_.add_cohort(cell_id, 1 /*juveniles/ootecas*/, local_count);
         }
+    }
+
+    if (n_occupied > 0) {
+        summary.mean_saturation = static_cast<float>(sum_sat / n_occupied);
     }
 
     return summary;

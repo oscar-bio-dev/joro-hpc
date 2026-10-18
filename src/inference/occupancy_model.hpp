@@ -2,6 +2,7 @@
 
 #include "common/types.hpp"
 #include <cmath>
+#include <algorithm>
 #include <vector>
 
 namespace joro::inference {
@@ -51,17 +52,38 @@ struct OccupancyParameters {
     return sigmoid(logit_val);
 }
 
-/// Calcula la probabilidad de detección p_{i,t} condicional al esfuerzo Araneae E
+/// Calcula la probabilidad de detección p_{i,t} condicional al esfuerzo Araneae E (Sección 9)
 [[nodiscard]] inline float compute_detection_prob(
     int32_t effort_araneae,
     float human_density_H,
     float road_density_R,
-    const OccupancyParameters& p = OccupancyParameters{}) noexcept 
+    const OccupancyParameters& p = OccupancyParameters{},
+    float f_est = 0.0f) noexcept 
 {
     float logit_val = p.beta0 + p.beta1_effort * std::log1p(static_cast<float>(effort_araneae)) +
                       p.beta2_human * human_density_H +
-                      p.beta3_road * road_density_R;
+                      p.beta3_road * road_density_R +
+                      f_est;
     return sigmoid(logit_val);
+}
+
+/// Actualiza la probabilidad latente de ocupación psi_{i,t} (Sección 9 de JORO-HPC.tex):
+/// psi_{i,t} = (1 - psi_{i,t-1}) * gamma_{i,t} + psi_{i,t-1} * phi_{i,t}
+[[nodiscard]] inline float update_dynamic_occupancy(
+    float psi_prev,
+    float gamma_colonization,
+    float phi_persistence) noexcept 
+{
+    return (1.0f - psi_prev) * gamma_colonization + psi_prev * phi_persistence;
+}
+
+/// Probabilidad marginal de registro observado (Sección 9):
+/// P_hat(Y_{i,t} = 1) = psi_{i,t} * p_{i,t}
+[[nodiscard]] inline float marginal_observation_prob(
+    float psi_occupancy,
+    float p_detection) noexcept 
+{
+    return std::clamp(psi_occupancy * p_detection, 0.0f, 1.0f);
 }
 
 } // namespace joro::inference
