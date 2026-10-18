@@ -35,6 +35,19 @@ struct DemographicParameters {
     float r_ref = 0.010f;          ///< Tasa diaria de desarrollo a T_ref (~100 días a 20°C)
 };
 
+/// Tabla densa cell_id -> posición en el vector de celdas (-1 si no existe).
+/// Se construye UNA vez por malla y se reutiliza en todas las evaluaciones (acceso O(1) sin hashing).
+struct CellIndexTable {
+    std::vector<int32_t> idx_of;
+
+    [[nodiscard]] static CellIndexTable build(const std::vector<GridCell>& cells);
+
+    [[nodiscard]] inline int32_t find(int32_t cell_id) const noexcept {
+        return (cell_id >= 0 && static_cast<size_t>(cell_id) < idx_of.size())
+                   ? idx_of[static_cast<size_t>(cell_id)] : -1;
+    }
+};
+
 struct DemographyYearSummary {
     uint64_t total_adults = 0;
     uint64_t total_offspring = 0;
@@ -97,9 +110,14 @@ public:
     const DemographicParameters& params() const noexcept { return params_; }
     void set_params(const DemographicParameters& p) noexcept { params_ = p; }
 
+    /// Registra una tabla de índices externa (no propietaria) que debe sobrevivir al motor.
+    /// Si no se registra, cada paso anual construye una tabla local equivalente.
+    void set_cell_index(const CellIndexTable* table) noexcept { cell_index_ext_ = table; }
+
 private:
     DemographicParameters params_;
     CohortSoA cohorts_;
+    const CellIndexTable* cell_index_ext_ = nullptr;
 };
 
 } // namespace joro::abm

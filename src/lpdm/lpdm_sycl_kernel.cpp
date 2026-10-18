@@ -42,6 +42,10 @@ public:
                       << dev.get_info<sycl::info::device::name>()
                       << " | Driver: " << dev.get_info<sycl::info::device::driver_version>()
                       << " (" << (dev.is_gpu() ? "GPU Level-Zero" : "Host") << ")\n";
+            is_gpu_ = dev.is_gpu();
+            device_desc_ = dev.get_info<sycl::info::device::name>() + " | " +
+                           dev.get_platform().get_info<sycl::info::platform::name>() +
+                           (is_gpu_ ? " | GPU" : " | NO-GPU");
             q_ = std::make_unique<sycl::queue>(dev, sycl::property::queue::in_order{});
             // Warmup JIT kernel para precompilar pipeline Level-Zero y eliminar latencia inicial
             q_->single_task([=]() {}).wait();
@@ -68,47 +72,86 @@ public:
         const std::vector<GridCell>& cells,
         const std::unordered_map<int32_t, uint32_t>& propagules_per_cell) override 
     {
-        cells_ = cells;
-        particles_.clear();
-        if (spatial_lookup_.empty() || cells_.size() != cells.size()) {
+        const auto t_init0 = std::chrono::steady_clock::now();
+
+        // La malla (256k celdas) solo se copia/indexa cuando cambia: el SpatialGridLookup y la tabla
+        // cell_id -> posición se reutilizan en las miles de evaluaciones de una calibración.
+        const bool same_grid =
+            !cells_.empty() && cells.size() == cells_.size() && cells.data() == grid_ptr_ &&
+            cells.front().cell_id == cells_.front().cell_id &&
+            cells.back().cell_id == cells_.back().cell_id &&
+            cells.front().centroid_lon == cells_.front().centroid_lon &&
+            cells.back().centroid_lat == cells_.back().centroid_lat;
+        if (!same_grid) {
+            cells_ = cells;
+            grid_ptr_ = cells.data();
             spatial_lookup_.build(cells_);
+            int32_t max_id = -1;
+            for (const auto& c : cells_) max_id = std::max(max_id, c.cell_id);
+            cell_pos_.assign(static_cast<size_t>(max_id + 1), -1);
+            for (size_t i = 0; i < cells_.size(); ++i) {
+                if (cells_[i].cell_id >= 0) cell_pos_[static_cast<size_t>(cells_[i].cell_id)] = static_cast<int32_t>(i);
+            }
         }
 
         constexpr uint32_t MAX_PARTICLES_PER_CELL = 25000;
 
-        for (const auto& cell : cells) {
-            auto it = propagules_per_cell.find(cell.cell_id);
-            if (it != propagules_per_cell.end() && it->second > 0) {
-                uint32_t total_props = it->second;
-                uint32_t n_sim = std::min(total_props, MAX_PARTICLES_PER_CELL);
-                uint32_t base_weight = total_props / n_sim;
-                uint32_t remainder = total_props % n_sim;
+        // Un trabajo por celda emisora; el orden por posición en la malla reproduce exactamente
+        // el orden de recorrido original (y por tanto la semilla de cada super-partícula).
+        struct Job { size_t pos; uint32_t total; uint32_t n_sim; size_t offset; };
+        std::vector<Job> jobs;
+        jobs.reserve(propagules_per_cell.size());
+        for (const auto& [cid, cnt] : propagules_per_cell) {
+            if (cnt == 0) continue;
+            const int32_t pos = (cid >= 0 && static_cast<size_t>(cid) < cell_pos_.size())
+                                    ? cell_pos_[static_cast<size_t>(cid)] : -1;
+            if (pos < 0) continue;
+            jobs.push_back({static_cast<size_t>(pos), cnt, std::min(cnt, MAX_PARTICLES_PER_CELL), 0});
+        }
+        std::sort(jobs.begin(), jobs.end(), [](const Job& a, const Job& b) { return a.pos < b.pos; });
 
-                // Generador para inyección convectiva idéntico al motor CPU
-                std::mt19937 init_rng(84920 + cell.cell_id);
-                std::uniform_real_distribution<float> takeoff_z(30.0f, 250.0f);
-                std::uniform_real_distribution<float> takeoff_w(0.35f, 0.50f);
+        size_t total_particles = 0;
+        for (auto& j : jobs) { j.offset = total_particles; total_particles += j.n_sim; }
 
-                for (uint32_t i = 0; i < n_sim; ++i) {
-                    Particle3D p;
-                    p.x = cell.centroid_lon;
-                    p.y = cell.centroid_lat;
-                    p.origin_x = cell.centroid_lon;
-                    p.origin_y = cell.centroid_lat;
-                    p.z = takeoff_z(init_rng); // Altura de entrada al régimen de baloneo libre
-                    p.w_prime = takeoff_w(init_rng); // Impulso convectivo ascendente inicial (w'_0 > vs ~0.295 m/s)
-                    p.mass_mg = 0.6f;          // Juvenil ninfal de mayo
-                    p.silk_length_m = 1.2f;    // Línea de baloneo
-                    p.posture_chi = 0.85f;
-                    // Partición entera exacta: suma total de pesos en la celda == total_props
-                    p.weight = static_cast<float>(base_weight + (i < remainder ? 1 : 0));
-                    p.origin_cell = cell.cell_id;
-                    p.is_active = true;
-                    particles_.push_back(p);
-                }
+        particles_.clear();
+        particles_.resize(total_particles);
+
+        #pragma omp parallel for schedule(dynamic, 16) if(total_particles > 4096)
+        for (size_t jb = 0; jb < jobs.size(); ++jb) {
+            const Job& job = jobs[jb];
+            const GridCell& cell = cells_[job.pos];
+            const uint32_t base_weight = job.total / job.n_sim;
+            const uint32_t remainder = job.total % job.n_sim;
+
+            // Generador para inyección convectiva idéntico al motor CPU
+            std::mt19937 init_rng(84920 + cell.cell_id);
+            std::uniform_real_distribution<float> takeoff_z(30.0f, 250.0f);
+            std::uniform_real_distribution<float> takeoff_w(0.35f, 0.50f);
+
+            for (uint32_t i = 0; i < job.n_sim; ++i) {
+                Particle3D& p = particles_[job.offset + i];
+                p.x = cell.centroid_lon;
+                p.y = cell.centroid_lat;
+                p.origin_x = cell.centroid_lon;
+                p.origin_y = cell.centroid_lat;
+                p.z = takeoff_z(init_rng); // Altura de entrada al régimen de baloneo libre
+                p.w_prime = takeoff_w(init_rng); // Impulso convectivo ascendente inicial (w'_0 > vs ~0.295 m/s)
+                p.mass_mg = 0.6f;          // Juvenil ninfal de mayo
+                p.silk_length_m = 1.2f;    // Línea de baloneo
+                p.posture_chi = 0.85f;
+                // Partición entera exacta: suma total de pesos en la celda == total_props
+                p.weight = static_cast<float>(base_weight + (i < remainder ? 1 : 0));
+                p.origin_cell = cell.cell_id;
+                p.is_active = true;
             }
         }
+
+        tel_.init_time_s += std::chrono::duration<double>(std::chrono::steady_clock::now() - t_init0).count();
     }
+
+    [[nodiscard]] EngineTelemetry telemetry() const override { return tel_; }
+    [[nodiscard]] bool is_gpu_offload_active() const noexcept override { return is_gpu_; }
+    [[nodiscard]] std::string device_description() const override { return device_desc_; }
 
     DispersionResult run_dispersion(
         const io::AtmosphericField3D& /*atmosphere*/,
@@ -117,6 +160,9 @@ public:
     {
         DispersionResult result;
         if (particles_.empty()) return result;
+
+        tel_.dispatches++;
+        tel_.particles_dispatched += particles_.size();
 
         bool offload_succeeded = false;
         const float vs_aero = compute_settling_velocity(0.6f, 1.2f, 0.85f); // ~0.2947 m/s
@@ -133,7 +179,7 @@ public:
 
                 if (padded_size > d_capacity_) {
                     if (d_particles_) sycl::free(d_particles_, q);
-                    d_capacity_ = padded_size + 65536;
+                    d_capacity_ = std::max<size_t>(padded_size + padded_size / 2, size_t{1} << 20);
                     d_particles_ = sycl::malloc_device<Particle3D>(d_capacity_, q);
                 }
 
@@ -148,7 +194,9 @@ public:
 
                 // Transferencia a GPU (Device USM) sin copia intermedia en host
                 Particle3D* d_particles = d_particles_;
+                const auto t_h2d0 = std::chrono::steady_clock::now();
                 q.memcpy(d_particles, particles_.data(), padded_size * sizeof(Particle3D)).wait();
+                tel_.h2d_time_s += std::chrono::duration<double>(std::chrono::steady_clock::now() - t_h2d0).count();
 
                 const float sqrt_dt = std::sqrt(dt_seconds);
                 constexpr float deg_to_rad = 3.14159265f / 180.0f;
@@ -222,8 +270,11 @@ public:
                 }).wait();
                 auto k_end = std::chrono::high_resolution_clock::now();
                 result.kernel_time_s = std::chrono::duration<double>(k_end - k_start).count();
+                tel_.kernel_time_s += result.kernel_time_s;
 
+                const auto t_d2h0 = std::chrono::steady_clock::now();
                 q.memcpy(particles_.data(), d_particles_, n_particles * sizeof(Particle3D)).wait();
+                tel_.d2h_time_s += std::chrono::duration<double>(std::chrono::steady_clock::now() - t_d2h0).count();
                 particles_.resize(n_particles);
                 offload_succeeded = true;
 
@@ -236,6 +287,7 @@ public:
 #endif
 
         if (!offload_succeeded) {
+            tel_.cpu_fallbacks++;
             const float sqrt_dt = std::sqrt(dt_seconds);
             constexpr float deg_to_rad = 3.14159265f / 180.0f;
             constexpr float rad_to_deg = 180.0f / 3.14159265f;
@@ -293,6 +345,7 @@ public:
         }
 
         // Reducción espacial multihilo O(1) con SpatialGridLookup
+        const auto t_red0 = std::chrono::steady_clock::now();
         constexpr double deg_to_rad_red = 3.141592653589793 / 180.0;
         constexpr double R_earth_red = 6371000.0;
         result.arrivals_per_cell.reserve(4096);
@@ -356,6 +409,7 @@ public:
         result.total_released = total_released_acc;
         result.total_landed = total_landed_acc;
         result.total_escaped = total_escaped_acc;
+        tel_.reduce_time_s += std::chrono::duration<double>(std::chrono::steady_clock::now() - t_red0).count();
 
         if (!landed_distances_km.empty()) {
             double sum_d = 0.0;
@@ -372,8 +426,13 @@ public:
 
 private:
     std::vector<GridCell> cells_;
+    const GridCell* grid_ptr_ = nullptr;
+    std::vector<int32_t> cell_pos_;   ///< cell_id -> posición en cells_ (-1 si no existe)
     std::vector<Particle3D> particles_;
     SpatialGridLookup spatial_lookup_;
+    EngineTelemetry tel_;
+    bool is_gpu_ = false;
+    std::string device_desc_ = "SYCL no disponible (fallback CPU)";
 #if defined(JORO_HAS_SYCL)
     std::unique_ptr<sycl::queue> q_;
     Particle3D* d_particles_ = nullptr;

@@ -1,17 +1,27 @@
 #include "inference/simulated_annealing.hpp"
-#include <iostream>
-#include <iomanip>
-#include <fstream>
-#include <sstream>
-#include <vector>
-#include <cmath>
-#include <random>
-#include <chrono>
+#include "common/fast_math.hpp"
 #include <algorithm>
+#include <array>
+#include <chrono>
+#include <cmath>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <random>
+#include <sstream>
+#include <stdexcept>
+#include <unordered_map>
+#include <vector>
 #include <omp.h>
 
 namespace joro::inference {
 
+// Vector de parámetros dominantes (Cribado de Morris, Fase 3). Los parámetros de baja sensibilidad
+// quedan fijos en F = 450.0 y Q10 = 2.2. beta_s es DISCRETO en {1, 2, 3} (Sección 8.3 del
+// anteproyecto, configs/priors_bounds.toml: beta_damage_candidates); su rango [1,3] solo delimita el
+// conjunto de candidatos y el optimizador únicamente propone saltos enteros entre ellos.
 const std::vector<CalibrationParamDef> CALIBRATION_PARAMS = {
     {"t_c",           "T_c,s",     -5.0f,     0.0f,    -3.5f},
     {"alpha_damage",  "alpha_s",   0.01f,    0.10f,    0.04f},
@@ -24,8 +34,357 @@ const std::vector<CalibrationParamDef> CALIBRATION_PARAMS = {
     {"gamma3_dosel",  "gamma_3",   0.05f,    0.80f,    0.30f}
 };
 
-// Distancias empíricas observadas del frente de avance radial (km) desde Braselton, GA (2014-2019)
-static const std::vector<double> OBSERVED_FRONT_KM = {42.9, 42.9, 24.1, 38.7, 56.6, 58.0};
+namespace {
+
+constexpr float  kEpiLat = 34.13816f;      // Braselton, GA (epicentro de la introducción)
+constexpr float  kEpiLon = -83.75723f;
+constexpr int    kFirstYear = 2014;
+constexpr int    kNYears = 6;              // 2014..2019 (la ventana 2020-2024 NO se carga jamás)
+constexpr int    kLpdmSteps = 60;          // Igual que el cribado de Morris (Fase 3): 60 pasos x 60 s
+constexpr float  kLpdmDt = 60.0f;
+constexpr double kEnvelopeBaseKm = 50.0;   // Alcance potencial base alrededor del frente observado
+
+ChainTelemetry operator-(const ChainTelemetry& a, const ChainTelemetry& b) {
+    ChainTelemetry d;
+    d.evaluations = a.evaluations - b.evaluations;
+    d.abm_time_s = a.abm_time_s - b.abm_time_s;
+    d.lpdm_init_time_s = a.lpdm_init_time_s - b.lpdm_init_time_s;
+    d.lpdm_h2d_time_s = a.lpdm_h2d_time_s - b.lpdm_h2d_time_s;
+    d.lpdm_kernel_time_s = a.lpdm_kernel_time_s - b.lpdm_kernel_time_s;
+    d.lpdm_d2h_time_s = a.lpdm_d2h_time_s - b.lpdm_d2h_time_s;
+    d.lpdm_reduce_time_s = a.lpdm_reduce_time_s - b.lpdm_reduce_time_s;
+    d.cost_time_s = a.cost_time_s - b.cost_time_s;
+    d.particles_dispatched = a.particles_dispatched - b.particles_dispatched;
+    d.cpu_fallbacks = a.cpu_fallbacks - b.cpu_fallbacks;
+    return d;
+}
+
+double elapsed_s(std::chrono::steady_clock::time_point t0) {
+    return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+}
+
+double dist_to_epicenter_km(float lat, float lon) {
+    const double dlat = (lat - kEpiLat) * 111.0;
+    const double dlon = (lon - kEpiLon) * 111.0 * std::cos(kEpiLat * 0.0174533);
+    return std::sqrt(dlat * dlat + dlon * dlon);
+}
+
+double percentile95(std::vector<double>& v) {
+    std::sort(v.begin(), v.end());
+    return v[static_cast<size_t>(0.95 * static_cast<double>(v.size() - 1))];
+}
+
+// Categorías de cada fila celda-año para el Brier estratificado
+enum : uint8_t { CAT_NONE = 0, CAT_ARR_POS = 1, CAT_ARR_NEG = 2, CAT_PER_POS = 3, CAT_PER_NEG = 4 };
+
+/// Conjunto de calibración preparado UNA vez: ordenado por año, covariables normalizadas,
+/// detección p_{i,t} precalculada (no depende de theta) y partición balanceada de llegada/persistencia.
+struct PreparedCalibration {
+    size_t n_rows = 0;
+    size_t n_slots = 0;
+    std::array<size_t, kNYears + 1> year_begin{};
+    std::vector<int32_t> cell_id;
+    std::vector<int32_t> slot;      // posición densa de la celda para el estado latente psi
+    std::vector<float>   h_norm;    // H_i normalizada a [0,1] por su máximo en el dominio
+    std::vector<float>   p_det;     // p_{i,t} (Sección 9) con el esfuerzo TGB
+    std::vector<uint8_t> cat;
+    std::vector<float>   psi_init;  // psi_{2013}: 1 en celdas semilla
+    std::vector<double>  obs_front_km;
+    CalibrationStratification strat;
+};
+
+PreparedCalibration prepare_calibration(
+    const std::vector<CalibrationObservation>& raw,
+    const std::vector<GridCell>& grid_cells)
+{
+    PreparedCalibration cal;
+
+    // Guardia de integridad: la partición 2020-2024 está BLOQUEADA hasta la Fase 5.
+    for (const auto& o : raw) {
+        if (o.year < kFirstYear || o.year >= kFirstYear + kNYears) {
+            throw std::runtime_error("Fila fuera de la ventana de calibración 2014-2019 (año " +
+                                     std::to_string(o.year) + "): v_evaluation_set debe permanecer bloqueada.");
+        }
+    }
+
+    std::vector<CalibrationObservation> obs = raw;
+    std::stable_sort(obs.begin(), obs.end(), [](const auto& a, const auto& b) {
+        return a.year != b.year ? a.year < b.year : a.cell_id < b.cell_id;
+    });
+
+    cal.n_rows = obs.size();
+    cal.strat.n_rows = obs.size();
+
+    // Normalización de covariables a [0,1] (H_i, R_i entran en logit(gamma) y logit(p))
+    float h_max = 0.0f, r_max = 0.0f;
+    for (const auto& o : obs) { h_max = std::max(h_max, o.pop_density_h); r_max = std::max(r_max, o.road_density_r); }
+    if (h_max <= 0.0f) h_max = 1.0f;
+    if (r_max <= 0.0f) r_max = 1.0f;
+
+    // Esfuerzo TGB por año: mediana del esfuerzo en filas SIN detección (fondo). En las filas con
+    // detección el valor almacenado por la ingesta es una cota inferior max(n_joro, 3), no un conteo
+    // TGB, y se imputa con la mediana del fondo del mismo año (en memoria; la BD no se modifica).
+    std::array<int32_t, kNYears> median_effort{};
+    for (int yi = 0; yi < kNYears; ++yi) {
+        std::vector<int32_t> bg;
+        for (const auto& o : obs) if (o.year == kFirstYear + yi && o.y_detected == 0) bg.push_back(o.effort_araneae);
+        if (!bg.empty()) {
+            std::nth_element(bg.begin(), bg.begin() + bg.size() / 2, bg.end());
+            median_effort[yi] = bg[bg.size() / 2];
+        } else {
+            median_effort[yi] = 1;
+        }
+    }
+
+    // Slots densos del estado latente
+    std::unordered_map<int32_t, int32_t> slot_of;
+    slot_of.reserve(60000);
+    for (const auto& o : obs) {
+        if (slot_of.find(o.cell_id) == slot_of.end()) {
+            const int32_t s = static_cast<int32_t>(slot_of.size());
+            slot_of.emplace(o.cell_id, s);
+        }
+    }
+    cal.n_slots = slot_of.size();
+    cal.psi_init.assign(cal.n_slots, 0.0f);
+    std::vector<uint8_t> last_y(cal.n_slots, 0);
+    for (const auto& c : grid_cells) {
+        if (!c.is_seed) continue;
+        auto it = slot_of.find(c.cell_id);
+        if (it != slot_of.end()) { cal.psi_init[it->second] = 1.0f; last_y[it->second] = 1; }
+    }
+
+    cal.cell_id.resize(cal.n_rows);
+    cal.slot.resize(cal.n_rows);
+    cal.h_norm.resize(cal.n_rows);
+    cal.p_det.resize(cal.n_rows);
+    cal.cat.assign(cal.n_rows, CAT_NONE);
+    cal.obs_front_km.assign(kNYears, 0.0);
+    cal.strat.envelope_radius_km.assign(kNYears, 0.0);
+
+    // Límites por año
+    size_t cursor = 0;
+    for (int yi = 0; yi < kNYears; ++yi) {
+        cal.year_begin[yi] = cursor;
+        while (cursor < obs.size() && obs[cursor].year == kFirstYear + yi) ++cursor;
+    }
+    cal.year_begin[kNYears] = cursor;
+
+    double cummax_front = 0.0;       // distancia máxima de presencias observadas en años previos
+    double prev_front_p95 = 5.0;     // arrastre del P95 observado si un año no tiene presencias
+    for (int yi = 0; yi < kNYears; ++yi) {
+        const double radius = kEnvelopeBaseKm + cummax_front;
+        cal.strat.envelope_radius_km[yi] = radius;
+        std::vector<double> presence_d;
+        double year_max = 0.0;
+
+        for (size_t r = cal.year_begin[yi]; r < cal.year_begin[yi + 1]; ++r) {
+            const auto& o = obs[r];
+            const int32_t s = slot_of[o.cell_id];
+            cal.cell_id[r] = o.cell_id;
+            cal.slot[r] = s;
+            cal.h_norm[r] = o.pop_density_h / h_max;
+            int32_t effort = o.effort_araneae;
+            if (o.y_detected == 1) { effort = median_effort[yi]; cal.strat.effort_imputed_rows++; }
+            cal.p_det[r] = compute_detection_prob(effort, o.pop_density_h / h_max, o.road_density_r / r_max);
+
+            const double d_km = dist_to_epicenter_km(o.centroid_lat, o.centroid_lon);
+            const uint8_t yprev = last_y[s];
+            uint8_t c = CAT_NONE;
+            if (yprev == 0) {
+                if (o.y_detected == 1)        { c = CAT_ARR_POS; cal.strat.arrival_pos++; }
+                else if (d_km <= radius)      { c = CAT_ARR_NEG; cal.strat.arrival_neg++; }
+                else                          { cal.strat.outside_envelope++; }
+            } else {
+                if (o.y_detected == 1)        { c = CAT_PER_POS; cal.strat.persistence_pos++; }
+                else                          { c = CAT_PER_NEG; cal.strat.persistence_neg++; }
+            }
+            cal.cat[r] = c;
+            if (o.y_detected == 1) { presence_d.push_back(d_km); year_max = std::max(year_max, d_km); }
+        }
+
+        // Actualizar historial observado para el año siguiente (después de clasificar todo el año)
+        for (size_t r = cal.year_begin[yi]; r < cal.year_begin[yi + 1]; ++r) last_y[cal.slot[r]] = obs[r].y_detected;
+
+        cal.obs_front_km[yi] = presence_d.empty() ? prev_front_p95 : percentile95(presence_d);
+        prev_front_p95 = cal.obs_front_km[yi];
+        cummax_front = std::max(cummax_front, year_max);
+    }
+    cal.strat.observed_front_km = cal.obs_front_km;
+    return cal;
+}
+
+/// Contexto de evaluación reutilizable (espacio de trabajo persistente entre evaluaciones)
+struct EvalContext {
+    const std::vector<GridCell>* grid = nullptr;
+    const abm::CellIndexTable* cidx = nullptr;
+    const std::vector<io::DailyThermalGrid>* thermal = nullptr;
+    const PreparedCalibration* cal = nullptr;
+    lpdm::LpdmEngine* lpdm = nullptr;
+    io::AtmosphericField3D atmo;           // El kernel SYCL no lee este campo (viento uniforme interno)
+    std::vector<float> epi_dist_km;        // distancia al epicentro por posición de celda
+
+    std::vector<float> psi;
+    std::vector<uint32_t> arr;             // A_{i,t} denso por cell_id
+    std::vector<float> adult;              // N_{i,t} denso por cell_id
+    std::vector<float> dsum;               // suma de D_{j,t} de las cohortes de la celda
+    std::vector<uint16_t> dcnt;            // número de cohortes de la celda (para D_barra)
+    std::vector<int32_t> touched;          // cell_ids tocados (limpieza dispersa)
+
+    ChainTelemetry tel;                    // contadores acumulados (ABM / costo)
+};
+
+CostComponents evaluate_candidate(
+    EvalContext& ctx,
+    const std::vector<float>& theta,
+    const CostReferenceScales& scales,
+    const CostWeights& weights)
+{
+    const auto& grid = *ctx.grid;
+    const auto& cal = *ctx.cal;
+
+    // 1. Parámetros ecofisiológicos y demográficos del ABM
+    abm::DemographicParameters p;
+    p.fecundity_F   = 450.0f; // Fijo empírico (Morris, baja sensibilidad)
+    p.q10           = 2.2f;   // Fijo empírico
+    p.t_c           = theta[0];
+    p.alpha_damage  = theta[1];
+    p.beta_damage   = std::clamp(static_cast<int>(std::lround(theta[kBetaDamageIndex])), 1, 3); // entero estricto
+    p.k0            = theta[3];
+    p.q_balloon     = theta[4];
+    p.q_viab        = theta[5];
+    p.gamma1_imp    = theta[6];
+    p.gamma2_borde  = theta[7];
+    p.gamma3_dosel  = theta[8];
+
+    abm::AbmEngine abm(p);
+    abm.set_cell_index(ctx.cidx);
+    abm.initialize_seed(grid, 0.15f);
+
+    ctx.psi = cal.psi_init;
+
+    std::vector<double> sim_front_per_year;
+    sim_front_per_year.reserve(kNYears);
+
+    BalancedBrierAccumulator arrival_acc, persistence_acc;
+
+    for (int yi = 0; yi < kNYears; ++yi) {
+        const int year = kFirstYear + yi;
+        const io::DailyThermalGrid& th = (*ctx.thermal)[static_cast<size_t>(yi)];
+
+        // ── ABM: invierno + eclosión + baloneo (OpenMP) ──
+        auto t_abm0 = std::chrono::steady_clock::now();
+        auto spring = abm.step_spring_phenology(grid, th, year);
+
+        // D_barra_{i,t}: daño invernal medio de las cohortes de cada celda (tras la mortalidad de invierno)
+        const auto& coh = abm.cohorts();
+        for (size_t i = 0; i < coh.size(); ++i) {
+            const int32_t cid = coh.cell_id[i];
+            if (cid < 0 || static_cast<size_t>(cid) >= ctx.dsum.size()) continue;
+            if (ctx.dcnt[cid] == 0) ctx.touched.push_back(cid);
+            ctx.dsum[cid] += coh.cold_damage_D[i];
+            if (ctx.dcnt[cid] < 65535) ctx.dcnt[cid]++;
+        }
+        ctx.tel.abm_time_s += elapsed_s(t_abm0);
+
+        // ── LPDM en la GPU (Device USM persistente) ──
+        ctx.lpdm->initialize_particles(grid, spring.ballooners_per_cell);
+        auto disp = ctx.lpdm->run_dispersion(ctx.atmo, kLpdmDt, kLpdmSteps);
+
+        // ── ABM: llegadas, desarrollo Q10 y reproducción Beverton-Holt ──
+        t_abm0 = std::chrono::steady_clock::now();
+        abm.deposit_arrivals(disp.arrivals_per_cell);
+        auto fall = abm.step_summer_autumn_phenology(grid, th, year);
+        ctx.tel.abm_time_s += elapsed_s(t_abm0);
+
+        // ── Frente simulado: P95 de la distancia al epicentro de las celdas con N > 2 ──
+        const auto t_cost0 = std::chrono::steady_clock::now();
+        std::vector<double> distances;
+        distances.reserve(fall.adult_density_per_cell.size());
+        for (const auto& [cell_id, count] : fall.adult_density_per_cell) {
+            if (count > 2.0f) {
+                const int32_t pos = ctx.cidx->find(cell_id);
+                if (pos >= 0) distances.push_back(ctx.epi_dist_km[static_cast<size_t>(pos)]);
+            }
+        }
+        sim_front_per_year.push_back(distances.empty() ? 5.0 : percentile95(distances));
+
+        // ── Volcado disperso a arreglos densos A_{i,t}, N_{i,t} ──
+        for (const auto& [cid, cnt] : disp.arrivals_per_cell) {
+            if (cid >= 0 && static_cast<size_t>(cid) < ctx.arr.size()) { ctx.arr[cid] = cnt; ctx.touched.push_back(cid); }
+        }
+        for (const auto& [cid, n] : fall.adult_density_per_cell) {
+            if (cid >= 0 && static_cast<size_t>(cid) < ctx.adult.size()) { ctx.adult[cid] = n; ctx.touched.push_back(cid); }
+        }
+
+        // ── Ocupación latente, detección TGB y Brier estratificado (OpenMP, 16 hilos) ──
+        double s_ap = 0.0, s_an = 0.0, s_pp = 0.0, s_pn = 0.0;
+        uint64_t n_ap = 0, n_an = 0, n_pp = 0, n_pn = 0;
+        const size_t rb = cal.year_begin[yi], re = cal.year_begin[yi + 1];
+        float* psi = ctx.psi.data();
+
+        #pragma omp parallel for schedule(static) reduction(+:s_ap, s_an, s_pp, s_pn, n_ap, n_an, n_pp, n_pn)
+        for (size_t r = rb; r < re; ++r) {
+            const int32_t cid = cal.cell_id[r];
+            const float D = ctx.dcnt[cid] ? ctx.dsum[cid] / static_cast<float>(ctx.dcnt[cid]) : 0.0f;
+
+            // logit(gamma) = a0 + a1 log(1 + A) + a2 H ;  logit(phi) = b0 + b1 log(1 + N) - b2 D
+            const float gamma = compute_colonization_gamma(ctx.arr[cid], cal.h_norm[r]);
+            const float phi = compute_persistence_phi(ctx.adult[cid], D);
+            const int32_t s = cal.slot[r];
+            // psi_t = (1 - psi_{t-1}) gamma + psi_{t-1} phi   (cada slot aparece una sola vez por año)
+            const float psi_cur = update_dynamic_occupancy(psi[s], gamma, phi);
+            psi[s] = psi_cur;
+
+            const uint8_t c = cal.cat[r];
+            if (c == CAT_NONE) continue;
+            // P_hat(Y=1) = psi * p
+            const double pm = marginal_observation_prob(psi_cur, cal.p_det[r]);
+            switch (c) {
+                case CAT_ARR_POS: s_ap += (1.0 - pm) * (1.0 - pm); ++n_ap; break;
+                case CAT_ARR_NEG: s_an += pm * pm;                 ++n_an; break;
+                case CAT_PER_POS: s_pp += (1.0 - pm) * (1.0 - pm); ++n_pp; break;
+                default:          s_pn += pm * pm;                 ++n_pn; break;
+            }
+        }
+        arrival_acc.sum_pos += s_ap; arrival_acc.sum_neg += s_an; arrival_acc.n_pos += n_ap; arrival_acc.n_neg += n_an;
+        persistence_acc.sum_pos += s_pp; persistence_acc.sum_neg += s_pn; persistence_acc.n_pos += n_pp; persistence_acc.n_neg += n_pn;
+
+        // Limpieza dispersa de los arreglos densos
+        for (int32_t cid : ctx.touched) { ctx.arr[cid] = 0; ctx.adult[cid] = 0.0f; ctx.dsum[cid] = 0.0f; ctx.dcnt[cid] = 0; }
+        ctx.touched.clear();
+        ctx.tel.cost_time_s += elapsed_s(t_cost0);
+    }
+
+    ctx.tel.evaluations++;
+    return finalize_multicriteria_cost(arrival_acc.value(), sim_front_per_year, cal.obs_front_km,
+                                       persistence_acc.value(), weights, scales);
+}
+
+/// Telemetría absoluta combinada (contadores del contexto + motor LPDM)
+ChainTelemetry snapshot(const EvalContext& ctx) {
+    ChainTelemetry t = ctx.tel;
+    const auto e = ctx.lpdm->telemetry();
+    t.lpdm_init_time_s = e.init_time_s;
+    t.lpdm_h2d_time_s = e.h2d_time_s;
+    t.lpdm_kernel_time_s = e.kernel_time_s;
+    t.lpdm_d2h_time_s = e.d2h_time_s;
+    t.lpdm_reduce_time_s = e.reduce_time_s;
+    t.particles_dispatched = e.particles_dispatched;
+    t.cpu_fallbacks = e.cpu_fallbacks;
+    return t;
+}
+
+struct EvalRecord {
+    int chain_id = 0;
+    int iteration = 0;
+    double temperature = 0.0;
+    bool accepted = false;
+    CostComponents comp;
+    std::vector<float> theta;
+};
+
+} // namespace
 
 std::vector<CalibrationObservation> load_calibration_dataset(const std::string& csv_path) {
     std::vector<CalibrationObservation> dataset;
@@ -91,168 +450,11 @@ std::vector<CalibrationObservation> load_calibration_dataset(const std::string& 
     return dataset;
 }
 
-static CostComponents evaluate_simulation_cost(
-    const std::vector<float>& theta,
-    const std::vector<GridCell>& grid_cells,
-    const io::DailyThermalGrid& thermal,
-    const std::vector<CalibrationObservation>& observations,
-    const CostReferenceScales& scales,
-    const CostWeights& weights = CostWeights{})
-{
-    // 1. Configurar parámetros ecofisiológicos y demográficos del ABM
-    abm::DemographicParameters p;
-    p.fecundity_F   = 450.0f; // Fijo empírico (Morris baja sensibilidad)
-    p.q10           = 2.2f;   // Fijo empírico
-    p.t_c           = theta[0];
-    p.alpha_damage  = theta[1];
-    p.beta_damage   = std::clamp(static_cast<int>(std::round(theta[2])), 1, 3);
-    p.k0            = theta[3];
-    p.q_balloon     = theta[4];
-    p.q_viab        = theta[5];
-    p.gamma1_imp    = theta[6];
-    p.gamma2_borde  = theta[7];
-    p.gamma3_dosel  = theta[8];
-
-    abm::AbmEngine abm(p);
-    abm.initialize_seed(grid_cells, 0.15f);
-
-    auto lpdm = lpdm::create_cpu_baseline_engine();
-
-    io::AtmosphericField3D mock_atmo;
-    mock_atmo.n_times = 60;
-    mock_atmo.n_levels = 12;
-    mock_atmo.n_lats = 81;
-    mock_atmo.n_lons = 101;
-    mock_atmo.pressure_levels_hpa = {1000, 975, 950, 925, 900, 875, 850, 825, 800, 775, 750, 700};
-    size_t tot_pts = static_cast<size_t>(mock_atmo.n_times) * mock_atmo.n_levels * mock_atmo.n_lats * mock_atmo.n_lons;
-    mock_atmo.u.assign(tot_pts, 3.8f);
-    mock_atmo.v.assign(tot_pts, 2.4f);
-    mock_atmo.w.assign(tot_pts, 0.02f);
-    mock_atmo.t.assign(tot_pts, 295.0f);
-
-    // Estado latente de ocupación previa psi_{i,t-1}: cell_id -> psi
-    std::unordered_map<int32_t, float> psi_map;
-    // Condición inicial: celdas semilla con presencia
-    for (const auto& c : grid_cells) {
-        if (c.is_seed) {
-            psi_map[c.cell_id] = 1.0f;
-        }
-    }
-
-    std::vector<double> sim_front_per_year;
-    sim_front_per_year.reserve(6);
-
-    std::vector<float> pred_marginal_all;
-    pred_marginal_all.reserve(observations.size());
-    std::vector<uint8_t> obs_y_all;
-    obs_y_all.reserve(observations.size());
-
-    double persistence_discrepancy_sum = 0.0;
-    int persistence_years_count = 0;
-
-    // Indexar observaciones por año para acceso rápido
-    // El dataset está ordenado por año: 2014..2019
-    size_t obs_idx = 0;
-    const size_t total_obs = observations.size();
-
-    constexpr float epi_lat = 34.13816f;
-    constexpr float epi_lon = -83.75723f;
-
-    for (int year = 2014; year <= 2019; ++year) {
-        auto spring = abm.step_spring_phenology(grid_cells, thermal, year);
-        lpdm->initialize_particles(grid_cells, spring.ballooners_per_cell);
-        auto disp = lpdm->run_dispersion(mock_atmo, 60.0f, 60);
-        abm.deposit_arrivals(disp.arrivals_per_cell);
-        auto fall = abm.step_summer_autumn_phenology(grid_cells, thermal, year);
-
-        // 1. Radio del frente simulado en el año t (Percentil 95 de distancia al epicentro)
-        std::vector<double> distances;
-        distances.reserve(1024);
-        for (const auto& [cell_id, count] : fall.adult_density_per_cell) {
-            if (count > 2.0f) {
-                // Distancia aproximada en km
-                float dlat = (grid_cells[cell_id % grid_cells.size()].centroid_lat - epi_lat) * 111.0f;
-                float dlon = (grid_cells[cell_id % grid_cells.size()].centroid_lon - epi_lon) * 111.0f * std::cos(epi_lat * 0.0174533f);
-                distances.push_back(std::sqrt(dlat * dlat + dlon * dlon));
-            }
-        }
-        double sim_p95_front = 0.0;
-        if (!distances.empty()) {
-            std::sort(distances.begin(), distances.end());
-            size_t p95_idx = static_cast<size_t>(0.95 * (distances.size() - 1));
-            sim_p95_front = distances[p95_idx];
-        } else {
-            sim_p95_front = 5.0; // Radio basal de celda semilla
-        }
-        sim_front_per_year.push_back(sim_p95_front);
-
-        // 2. Evaluar observaciones y persistencia para este año
-        double sim_phi_sum = 0.0;
-        double obs_persist_sum = 0.0;
-        int occupied_prev_count = 0;
-
-        while (obs_idx < total_obs && observations[obs_idx].year == year) {
-            const auto& obs = observations[obs_idx];
-            int32_t cid = obs.cell_id;
-
-            uint32_t arr = 0;
-            auto it_arr = disp.arrivals_per_cell.find(cid);
-            if (it_arr != disp.arrivals_per_cell.end()) arr = it_arr->second;
-
-            float adult_n = 0.0f;
-            auto it_n = fall.adult_density_per_cell.find(cid);
-            if (it_n != fall.adult_density_per_cell.end()) adult_n = it_n->second;
-
-            float gamma_col = compute_colonization_gamma(arr, obs.pop_density_h);
-            float phi_pers = compute_persistence_phi(adult_n, 0.05f);
-
-            float psi_prev = 0.0f;
-            auto it_psi = psi_map.find(cid);
-            if (it_psi != psi_map.end()) psi_prev = it_psi->second;
-
-            float psi_curr = update_dynamic_occupancy(psi_prev, gamma_col, phi_pers);
-            psi_map[cid] = psi_curr;
-
-            float p_det = compute_detection_prob(obs.effort_araneae, obs.pop_density_h, obs.road_density_r);
-            float p_marg = marginal_observation_prob(psi_curr, p_det);
-
-            pred_marginal_all.push_back(p_marg);
-            obs_y_all.push_back(obs.y_detected);
-
-            if (psi_prev > 0.5f) {
-                sim_phi_sum += phi_pers;
-                obs_persist_sum += obs.y_detected;
-                occupied_prev_count++;
-            }
-
-            obs_idx++;
-        }
-
-        if (occupied_prev_count > 0) {
-            double sim_rate = sim_phi_sum / occupied_prev_count;
-            double obs_rate = obs_persist_sum / occupied_prev_count;
-            persistence_discrepancy_sum += std::abs(sim_rate - obs_rate);
-            persistence_years_count++;
-        }
-    }
-
-    double mean_persistence_disc = (persistence_years_count > 0) 
-        ? (persistence_discrepancy_sum / persistence_years_count) : 0.05;
-
-    return evaluate_multicriteria_cost(
-        pred_marginal_all,
-        obs_y_all,
-        sim_front_per_year,
-        OBSERVED_FRONT_KM,
-        mean_persistence_disc,
-        weights,
-        scales);
-}
-
 SimulatedAnnealingReport run_multi_start_simulated_annealing(
     const std::vector<GridCell>& grid_cells,
-    const io::DailyThermalGrid& thermal,
+    const std::vector<io::DailyThermalGrid>& thermal_by_year,
     const std::vector<CalibrationObservation>& observations,
+    lpdm::LpdmEngine* lpdm_engine,
     int n_chains,
     int iter_per_chain,
     double initial_temp,
@@ -263,263 +465,344 @@ SimulatedAnnealingReport run_multi_start_simulated_annealing(
     report.n_chains = n_chains;
     report.iter_per_chain = iter_per_chain;
     report.total_evaluations = n_chains * iter_per_chain;
+    report.omp_max_threads = omp_get_max_threads();
+
+    if (lpdm_engine == nullptr) throw std::invalid_argument("Se requiere un motor LPDM (GPU SYCL).");
+    if (thermal_by_year.size() < static_cast<size_t>(kNYears)) {
+        throw std::invalid_argument("Se requieren 6 grillas térmicas diarias (2014-2019).");
+    }
+    // La GPU es obligatoria en cada evaluación; solo se admite CPU de forma explícita para depuración.
+    const char* allow_cpu = std::getenv("JORO_ALLOW_CPU_FALLBACK");
+    const bool cpu_ok = allow_cpu != nullptr && std::string(allow_cpu) == "1";
+    report.device_description = lpdm_engine->device_description();
+    if (!lpdm_engine->is_gpu_offload_active() && !cpu_ok) {
+        throw std::runtime_error("El motor LPDM no está en una GPU SYCL (" + report.device_description +
+                                 "). Defina JORO_ALLOW_CPU_FALLBACK=1 solo para depuración.");
+    }
 
     const int n_params = static_cast<int>(CALIBRATION_PARAMS.size());
+    const char* env_threads = std::getenv("OMP_NUM_THREADS");
+    const char* env_bind = std::getenv("OMP_PROC_BIND");
+    const char* env_places = std::getenv("OMP_PLACES");
+
     std::cout << "\n===================================================================\n";
     std::cout << "▶ Invocando Recocido Simulado Multi-inicio (Simulated Annealing)\n";
-    std::cout << "  Cadenas independientes  : " << n_chains << " multi-start\n";
+    std::cout << "  Cadenas independientes  : " << n_chains << " multi-start (ejecución SECUENCIAL)\n";
     std::cout << "  Iteraciones por cadena  : " << iter_per_chain << " iter\n";
     std::cout << "  Total evaluaciones 2014-2019 : " << report.total_evaluations << "\n";
-    std::cout << "  Espacio de parámetros   : " << n_params << " dimensiones dominantes\n";
+    std::cout << "  Espacio de parámetros   : " << n_params << " dimensiones dominantes (beta_s discreto {1,2,3})\n";
     std::cout << "  Temperatura inicial T0  : " << initial_temp << "\n";
     std::cout << "  Tolerancia Delta (Theta_comp) : " << delta_threshold << "\n";
+    std::cout << "  Dispositivo LPDM        : " << report.device_description << "\n";
+    std::cout << "  Hilos OpenMP            : " << report.omp_max_threads
+              << " | OMP_NUM_THREADS=" << (env_threads ? env_threads : "(no definida)")
+              << " OMP_PROC_BIND=" << (env_bind ? env_bind : "(no definida)")
+              << " OMP_PLACES=" << (env_places ? env_places : "(no definida)") << "\n";
     std::cout << "===================================================================\n";
 
-    auto t0 = std::chrono::high_resolution_clock::now();
+    const auto t0 = std::chrono::steady_clock::now();
 
-    // 1. Calcular escalas de referencia en el punto nominal (theta_default)
-    std::vector<float> theta_nominal(n_params);
-    for (int i = 0; i < n_params; ++i) {
-        theta_nominal[i] = CALIBRATION_PARAMS[i].default_val;
+    // 0. Preparación única: conjunto de calibración estratificado, índice de celdas, espacio de trabajo
+    PreparedCalibration cal = prepare_calibration(observations, grid_cells);
+    report.stratification = cal.strat;
+    {
+        const auto& s = cal.strat;
+        std::cout << "[Calibración] Filas celda-año (2014-2019): " << s.n_rows << " | v_evaluation_set: 0 filas cargadas (bloqueada)\n";
+        std::cout << "[Calibración] Llegada: " << s.arrival_pos << " positivos / " << s.arrival_neg
+                  << " negativos en la envolvente activa (" << s.outside_envelope << " ausencias lejanas excluidas)\n";
+        std::cout << "[Calibración] Persistencia: " << s.persistence_pos << " positivos / " << s.persistence_neg << " negativos\n";
+        std::cout << "[Calibración] Radio de envolvente por año [km]:";
+        for (double r : s.envelope_radius_km) std::cout << " " << std::fixed << std::setprecision(1) << r;
+        std::cout << "\n[Calibración] Frente observado P95 por año [km]:";
+        for (double f : s.observed_front_km) std::cout << " " << std::fixed << std::setprecision(1) << f;
+        std::cout << "\n[Calibración] Esfuerzo imputado en " << s.effort_imputed_rows << " filas con detección (ver informe)\n";
     }
+
+    abm::CellIndexTable cidx = abm::CellIndexTable::build(grid_cells);
+    EvalContext ctx;
+    ctx.grid = &grid_cells;
+    ctx.cidx = &cidx;
+    ctx.thermal = &thermal_by_year;
+    ctx.cal = &cal;
+    ctx.lpdm = lpdm_engine;
+    ctx.atmo.n_times = kLpdmSteps;
+    ctx.arr.assign(cidx.idx_of.size(), 0);
+    ctx.adult.assign(cidx.idx_of.size(), 0.0f);
+    ctx.dsum.assign(cidx.idx_of.size(), 0.0f);
+    ctx.dcnt.assign(cidx.idx_of.size(), 0);
+    ctx.epi_dist_km.resize(grid_cells.size());
+    for (size_t i = 0; i < grid_cells.size(); ++i) {
+        ctx.epi_dist_km[i] = static_cast<float>(dist_to_epicenter_km(grid_cells[i].centroid_lat, grid_cells[i].centroid_lon));
+    }
+
+    // 1. Escalas de referencia en el punto nominal (theta_default); sirve además de calentamiento de la GPU
+    std::vector<float> theta_nominal(n_params);
+    for (int i = 0; i < n_params; ++i) theta_nominal[i] = CALIBRATION_PARAMS[i].default_val;
 
     std::cout << "[Simulated Annealing] Evaluando escala de referencia inicial en theta_nominal...\n";
     CostReferenceScales unit_scales{1.0, 1.0, 1.0};
-    CostComponents nom_comp = evaluate_simulation_cost(
-        theta_nominal, grid_cells, thermal, observations, unit_scales);
+    CostWeights weights_base{0.333333, 0.333333, 0.333334};
+    CostComponents nom_comp = evaluate_candidate(ctx, theta_nominal, unit_scales, weights_base);
 
     CostReferenceScales reference_scales{
         std::max(nom_comp.j_arrival_raw, 0.0001),
         std::max(nom_comp.j_front_raw, 1.0),
         std::max(nom_comp.j_persistence_raw, 0.01)
     };
+    report.reference_scales = reference_scales;
+    report.nominal_components = nom_comp;
 
     std::cout << std::fixed << std::setprecision(5);
-    std::cout << "  Escala Brier S_llegada     : " << reference_scales.s_arrival << "\n";
-    std::cout << "  Escala Frente S_frente (km): " << reference_scales.s_front << "\n";
-    std::cout << "  Escala Persistencia S_pers : " << reference_scales.s_persistence << "\n";
+    std::cout << "  Escala Brier balanceado S_llegada     : " << reference_scales.s_arrival << "\n";
+    std::cout << "  Escala Frente S_frente (km)           : " << reference_scales.s_front << "\n";
+    std::cout << "  Escala Brier balanceado S_persistencia: " << reference_scales.s_persistence << "\n";
 
     // Configuraciones de pesos para análisis de sensibilidad
-    CostWeights weights_base{0.333333, 0.333333, 0.333334};
     CostWeights weights_config_a{0.20, 0.60, 0.20}; // Enfoque Frente/Dispersión
     CostWeights weights_config_b{0.20, 0.20, 0.60}; // Enfoque Persistencia/Resistencia Térmica
+    auto weighted = [](const CostWeights& w, const CostComponents& c) {
+        return w.w1_arrival * c.j_arrival_norm + w.w2_front * c.j_front_norm + w.w3_persistence * c.j_persistence_norm;
+    };
 
-    // Contenedores por cadena
-    std::vector<ChainConvergenceRecord> chain_records(n_chains);
-    std::vector<std::vector<CompatibleEnsembleMember>> chain_members(n_chains);
+    // Registro de TODAS las evaluaciones (para Theta_comp y sensibilidad de pesos)
+    std::vector<EvalRecord> all_evals;
+    all_evals.reserve(static_cast<size_t>(n_chains) * (iter_per_chain + 1));
+    report.chains.resize(n_chains);
 
-    // Semillas para cada cadena
     const std::vector<uint32_t> chain_seeds = {1001, 2002, 3003, 4004, 5005};
 
     // Factor de enfriamiento geométrico T_k = T0 * alpha^k
     const double cooling_alpha = std::pow(0.001 / initial_temp, 1.0 / iter_per_chain);
 
-    #pragma omp parallel for schedule(dynamic, 1)
+    // 2. Cadenas SECUENCIALES: cada evaluación dispone del 100 % de la GPU y de los 16 hilos del host
     for (int c = 0; c < n_chains; ++c) {
-        auto c_t0 = std::chrono::high_resolution_clock::now();
-        uint32_t seed = chain_seeds[c % chain_seeds.size()];
+        const auto c_t0 = std::chrono::steady_clock::now();
+        const ChainTelemetry tel_start = snapshot(ctx);
+
+        const uint32_t seed = chain_seeds[static_cast<size_t>(c) % chain_seeds.size()];
         std::mt19937 rng(seed);
         std::uniform_real_distribution<double> dist_01(0.0, 1.0);
         std::normal_distribution<double> norm_dist(0.0, 1.0);
 
-        ChainConvergenceRecord& rec = chain_records[c];
+        ChainConvergenceRecord& rec = report.chains[c];
         rec.chain_id = c + 1;
         rec.seed = seed;
         rec.total_iterations = iter_per_chain;
+        rec.trace.reserve(static_cast<size_t>(iter_per_chain) + 1);
 
-        // Estado inicial de la cadena
+        // Estado inicial: cadena 1 en theta_nominal; las demás, muestreo uniforme en el hipercubo
         std::vector<float> curr_theta(n_params);
         if (c == 0) {
             curr_theta = theta_nominal;
         } else {
-            // Muestreo aleatorio dentro del hipercubo de prior bounds
             for (int i = 0; i < n_params; ++i) {
-                float min_v = CALIBRATION_PARAMS[i].min_val;
-                float max_v = CALIBRATION_PARAMS[i].max_val;
-                curr_theta[i] = min_v + static_cast<float>(dist_01(rng)) * (max_v - min_v);
+                const float min_v = CALIBRATION_PARAMS[i].min_val;
+                const float max_v = CALIBRATION_PARAMS[i].max_val;
+                if (i == kBetaDamageIndex) {
+                    curr_theta[i] = static_cast<float>(1 + std::min(2, static_cast<int>(dist_01(rng) * 3.0))); // {1,2,3}
+                } else {
+                    curr_theta[i] = min_v + static_cast<float>(dist_01(rng)) * (max_v - min_v);
+                }
             }
         }
 
-        CostComponents curr_comp = evaluate_simulation_cost(
-            curr_theta, grid_cells, thermal, observations, reference_scales, weights_base);
-
+        CostComponents curr_comp = evaluate_candidate(ctx, curr_theta, reference_scales, weights_base);
         rec.initial_cost = curr_comp.j_total;
+        rec.initial_components = curr_comp;
         rec.min_cost = curr_comp.j_total;
         rec.best_theta = curr_theta;
         rec.best_components = curr_comp;
+        all_evals.push_back({c + 1, 0, initial_temp, true, curr_comp, curr_theta});
+        rec.trace.push_back({0.0, initial_temp, curr_comp.j_total, rec.min_cost});
 
         double temp = initial_temp;
 
         for (int iter = 0; iter < iter_per_chain; ++iter) {
-            // Proponer nuevo candidato mediante perturbación gaussiana escalada por temperatura
+            // Propuesta: perturbación gaussiana escalada por temperatura en los parámetros continuos;
+            // salto discreto entre {1,2,3} para beta_s.
             std::vector<float> prop_theta(n_params);
-            double temp_ratio = std::sqrt(temp / initial_temp);
+            const double temp_ratio = std::sqrt(temp / initial_temp);
 
             for (int i = 0; i < n_params; ++i) {
-                float span = CALIBRATION_PARAMS[i].max_val - CALIBRATION_PARAMS[i].min_val;
-                double step = norm_dist(rng) * 0.12 * span * temp_ratio;
-                float val = curr_theta[i] + static_cast<float>(step);
+                if (i == kBetaDamageIndex) {
+                    const int cur_b = std::clamp(static_cast<int>(std::lround(curr_theta[i])), 1, 3);
+                    int new_b = cur_b;
+                    if (dist_01(rng) < 0.30) {
+                        // Salta a uno de los otros dos valores con igual probabilidad
+                        new_b = ((cur_b - 1) + (dist_01(rng) < 0.5 ? 1 : 2)) % 3 + 1;
+                    }
+                    prop_theta[i] = static_cast<float>(new_b);
+                    continue;
+                }
+                const float span = CALIBRATION_PARAMS[i].max_val - CALIBRATION_PARAMS[i].min_val;
+                const double step = norm_dist(rng) * 0.12 * span * temp_ratio;
+                const float val = curr_theta[i] + static_cast<float>(step);
                 prop_theta[i] = std::clamp(val, CALIBRATION_PARAMS[i].min_val, CALIBRATION_PARAMS[i].max_val);
             }
 
-            CostComponents prop_comp = evaluate_simulation_cost(
-                prop_theta, grid_cells, thermal, observations, reference_scales, weights_base);
+            CostComponents prop_comp = evaluate_candidate(ctx, prop_theta, reference_scales, weights_base);
 
-            double delta_j = prop_comp.j_total - curr_comp.j_total;
-            bool accept = false;
+            const double delta_j = prop_comp.j_total - curr_comp.j_total;
+            bool accept = (delta_j <= 0.0) || (dist_01(rng) < std::exp(-delta_j / temp));
 
-            if (delta_j <= 0.0) {
-                accept = true;
-            } else {
-                double p_accept = std::exp(-delta_j / temp);
-                if (dist_01(rng) < p_accept) {
-                    accept = true;
-                }
-            }
+            all_evals.push_back({c + 1, iter + 1, temp, accept, prop_comp, prop_theta});
 
             if (accept) {
                 curr_theta = prop_theta;
                 curr_comp = prop_comp;
                 rec.accepted_proposals++;
-
                 if (curr_comp.j_total < rec.min_cost) {
                     rec.min_cost = curr_comp.j_total;
                     rec.best_theta = curr_theta;
                     rec.best_components = curr_comp;
                 }
-
-                // Evaluar costos bajo configuraciones alternativas A y B analíticamente a partir de componentes normalizados
-                double j_comp_a = weights_config_a.w1_arrival * curr_comp.j_arrival_norm +
-                                  weights_config_a.w2_front   * curr_comp.j_front_norm +
-                                  weights_config_a.w3_persistence * curr_comp.j_persistence_norm;
-                double j_comp_b = weights_config_b.w1_arrival * curr_comp.j_arrival_norm +
-                                  weights_config_b.w2_front   * curr_comp.j_front_norm +
-                                  weights_config_b.w3_persistence * curr_comp.j_persistence_norm;
-
-                CompatibleEnsembleMember member{};
-                member.chain_id = c + 1;
-                member.iteration = iter;
-                member.temperature = temp;
-                member.j_total = curr_comp.j_total;
-                member.j_arrival_norm = curr_comp.j_arrival_norm;
-                member.j_front_norm = curr_comp.j_front_norm;
-                member.j_persistence_norm = curr_comp.j_persistence_norm;
-                member.j_config_a = j_comp_a;
-                member.j_config_b = j_comp_b;
-                member.theta = curr_theta;
-
-                chain_members[c].push_back(member);
             }
 
-            // Enfriamiento geométrico
             temp *= cooling_alpha;
+            rec.trace.push_back({static_cast<double>(iter + 1), temp, curr_comp.j_total, rec.min_cost});
+
+            if ((iter + 1) % 100 == 0) {
+                const double el = elapsed_s(c_t0);
+                std::cout << "  [Cadena " << (c + 1) << "] iter " << std::setw(3) << (iter + 1) << "/" << iter_per_chain
+                          << " | T = " << std::setprecision(4) << temp
+                          << " | J = " << curr_comp.j_total << " | J* = " << rec.min_cost
+                          << " | " << std::setprecision(2) << el << " s (" << (static_cast<double>(iter + 2) / el) << " eval/s)\n"
+                          << std::flush;
+            }
         }
 
-        auto c_t1 = std::chrono::high_resolution_clock::now();
-        rec.execution_time_s = std::chrono::duration<double>(c_t1 - c_t0).count();
+        rec.execution_time_s = elapsed_s(c_t0);
+        rec.telemetry = snapshot(ctx) - tel_start;
 
-        #pragma omp critical
-        {
-            std::cout << "[Cadena " << rec.chain_id << "] Finalizada en " 
-                      << std::fixed << std::setprecision(2) << rec.execution_time_s << " s | "
-                      << "J0 = " << std::setprecision(4) << rec.initial_cost << " -> "
-                      << "Jmin = " << rec.min_cost << " | "
-                      << "Aceptadas = " << rec.accepted_proposals << "/" << iter_per_chain << " ("
-                      << (rec.accepted_proposals * 100 / iter_per_chain) << "%)\n";
-        }
+        std::cout << "[Cadena " << rec.chain_id << "] Finalizada en "
+                  << std::fixed << std::setprecision(2) << rec.execution_time_s << " s | "
+                  << "J0 = " << std::setprecision(4) << rec.initial_cost << " -> "
+                  << "Jmin = " << rec.min_cost << " | "
+                  << "Aceptadas = " << rec.accepted_proposals << "/" << iter_per_chain << " ("
+                  << (rec.accepted_proposals * 100 / iter_per_chain) << "%)\n";
     }
 
-    auto t1 = std::chrono::high_resolution_clock::now();
-    report.total_runtime_s = std::chrono::duration<double>(t1 - t0).count();
-    report.chains = chain_records;
+    report.total_runtime_s = elapsed_s(t0);
+    report.telemetry_total = snapshot(ctx);
 
-    // 2. Determinar la mejor solución global (MAP / J_min)
+    // 3. Mejor solución global (MAP / J_min)
     double global_min = 1e6;
     int best_chain_idx = 0;
-    for (size_t c = 0; c < chain_records.size(); ++c) {
-        if (chain_records[c].min_cost < global_min) {
-            global_min = chain_records[c].min_cost;
+    for (size_t c = 0; c < report.chains.size(); ++c) {
+        if (report.chains[c].min_cost < global_min) {
+            global_min = report.chains[c].min_cost;
             best_chain_idx = static_cast<int>(c);
         }
     }
     report.global_min_cost = global_min;
-    report.map_theta = chain_records[best_chain_idx].best_theta;
-    report.map_components = chain_records[best_chain_idx].best_components;
+    report.map_theta = report.chains[best_chain_idx].best_theta;
+    report.map_components = report.chains[best_chain_idx].best_components;
 
-    // 3. Construir el conjunto compatible Theta_comp: { theta : J(theta) <= J_min + Delta }
+    // 4. Conjunto compatible Theta_comp = { theta evaluado : J(theta) <= J_min + Delta }
+    //    sobre TODAS las evaluaciones (aceptadas o no).
     const double j_threshold = global_min + delta_threshold;
-    std::vector<CompatibleEnsembleMember> all_compatible;
-
-    for (int c = 0; c < n_chains; ++c) {
-        for (const auto& mem : chain_members[c]) {
-            if (mem.j_total <= j_threshold) {
-                all_compatible.push_back(mem);
-            }
-        }
+    std::vector<size_t> comp_idx;
+    for (size_t k = 0; k < all_evals.size(); ++k) {
+        if (all_evals[k].comp.j_total <= j_threshold) comp_idx.push_back(k);
     }
-    report.compatible_ensemble = all_compatible;
-
-    // Evaluar retención frente a pesos alternativos respecto a sus mínimos específicos
-    if (!all_compatible.empty()) {
-        double min_j_a = 1e6;
-        double min_j_b = 1e6;
-        for (const auto& mem : all_compatible) {
-            if (mem.j_config_a < min_j_a) min_j_a = mem.j_config_a;
-            if (mem.j_config_b < min_j_b) min_j_b = mem.j_config_b;
-        }
-
-        int compatible_count_a = 0;
-        int compatible_count_b = 0;
-        for (const auto& mem : all_compatible) {
-            if (mem.j_config_a <= min_j_a + delta_threshold) compatible_count_a++;
-            if (mem.j_config_b <= min_j_b + delta_threshold) compatible_count_b++;
-        }
-
-        report.retention_rate_config_a = static_cast<double>(compatible_count_a) / all_compatible.size() * 100.0;
-        report.retention_rate_config_b = static_cast<double>(compatible_count_b) / all_compatible.size() * 100.0;
+    for (size_t k : comp_idx) {
+        const auto& e = all_evals[k];
+        CompatibleEnsembleMember m;
+        m.chain_id = e.chain_id;
+        m.iteration = e.iteration;
+        m.temperature = e.temperature;
+        m.j_total = e.comp.j_total;
+        m.j_arrival_norm = e.comp.j_arrival_norm;
+        m.j_front_norm = e.comp.j_front_norm;
+        m.j_persistence_norm = e.comp.j_persistence_norm;
+        m.j_config_a = weighted(weights_config_a, e.comp);
+        m.j_config_b = weighted(weights_config_b, e.comp);
+        m.theta = e.theta;
+        report.compatible_ensemble.push_back(std::move(m));
     }
 
-    // 4. Calcular percentiles P5, Mediana, P95 en Theta_comp
-    report.p5_theta.resize(n_params);
-    report.median_theta.resize(n_params);
-    report.p95_theta.resize(n_params);
+    // 5. Sensibilidad a pesos: Theta_comp^A, Theta_comp^B se reconstruyen sobre todas las evaluaciones
+    //    con su propio J_min; la retención es la fracción de Theta_comp (base) que permanece en ellos.
+    if (!comp_idx.empty()) {
+        double min_a = 1e9, min_b = 1e9;
+        for (const auto& e : all_evals) {
+            min_a = std::min(min_a, weighted(weights_config_a, e.comp));
+            min_b = std::min(min_b, weighted(weights_config_b, e.comp));
+        }
+        report.j_min_config_a = min_a;
+        report.j_min_config_b = min_b;
+        size_t keep_a = 0, keep_b = 0;
+        for (size_t k : comp_idx) {
+            if (weighted(weights_config_a, all_evals[k].comp) <= min_a + delta_threshold) ++keep_a;
+            if (weighted(weights_config_b, all_evals[k].comp) <= min_b + delta_threshold) ++keep_b;
+        }
+        report.retention_rate_config_a = 100.0 * static_cast<double>(keep_a) / static_cast<double>(comp_idx.size());
+        report.retention_rate_config_b = 100.0 * static_cast<double>(keep_b) / static_cast<double>(comp_idx.size());
+    }
 
-    if (!all_compatible.empty()) {
+    // 6. Percentiles P5, Mediana, P95 en Theta_comp
+    report.p5_theta.assign(n_params, 0.0f);
+    report.median_theta.assign(n_params, 0.0f);
+    report.p95_theta.assign(n_params, 0.0f);
+    if (!report.compatible_ensemble.empty()) {
         for (int p_idx = 0; p_idx < n_params; ++p_idx) {
             std::vector<float> vals;
-            vals.reserve(all_compatible.size());
-            for (const auto& mem : all_compatible) {
-                vals.push_back(mem.theta[p_idx]);
-            }
+            vals.reserve(report.compatible_ensemble.size());
+            for (const auto& mem : report.compatible_ensemble) vals.push_back(mem.theta[p_idx]);
             std::sort(vals.begin(), vals.end());
-            size_t n = vals.size();
+            const size_t n = vals.size();
             report.p5_theta[p_idx] = vals[static_cast<size_t>(0.05 * (n - 1))];
             report.median_theta[p_idx] = vals[static_cast<size_t>(0.50 * (n - 1))];
             report.p95_theta[p_idx] = vals[static_cast<size_t>(0.95 * (n - 1))];
         }
     }
 
-    // 5. Guardar ensamble compatible en CSV
+    // 7. Persistencia en disco: ensamble compatible y traza de convergencia
+    abm::CarryingCapacityParams cc_base{};
+    cc_base.k_min = 100.0f;
+    cc_base.k_max = 50000.0f;
+    const GridCell* seed_cell = nullptr;
+    for (const auto& gc : grid_cells) if (gc.is_seed) { seed_cell = &gc; break; }
+
+    std::filesystem::path ckpt_path(checkpoint_csv_path);
+    std::error_code ec;
+    std::filesystem::create_directories(ckpt_path.parent_path(), ec);
+
     std::ofstream out_file(checkpoint_csv_path);
     if (out_file.is_open()) {
         out_file << "chain_id,iteration,temperature,j_total,j_arrival_norm,j_front_norm,j_persistence_norm,j_config_a,j_config_b";
-        for (int i = 0; i < n_params; ++i) {
-            out_file << "," << CALIBRATION_PARAMS[i].name;
-        }
-        out_file << "\n";
-
-        for (const auto& mem : all_compatible) {
+        for (int i = 0; i < n_params; ++i) out_file << "," << CALIBRATION_PARAMS[i].name;
+        out_file << ",k_eff_seed\n";
+        out_file << std::setprecision(7);
+        for (const auto& mem : report.compatible_ensemble) {
             out_file << mem.chain_id << "," << mem.iteration << "," << mem.temperature << ","
                      << mem.j_total << "," << mem.j_arrival_norm << "," << mem.j_front_norm << ","
                      << mem.j_persistence_norm << "," << mem.j_config_a << "," << mem.j_config_b;
-            for (int i = 0; i < n_params; ++i) {
-                out_file << "," << mem.theta[i];
+            for (int i = 0; i < n_params; ++i) out_file << "," << mem.theta[i];
+            // Capacidad efectiva K_i de la celda epicentral bajo este theta
+            float k_eff = 0.0f;
+            if (seed_cell != nullptr) {
+                abm::CarryingCapacityParams cc = cc_base;
+                cc.k0 = mem.theta[3]; cc.gamma1_imp = mem.theta[6]; cc.gamma2_borde = mem.theta[7]; cc.gamma3_dosel = mem.theta[8];
+                k_eff = abm::compute_carrying_capacity(*seed_cell, cc);
             }
-            out_file << "\n";
+            out_file << "," << k_eff << "\n";
         }
         out_file.close();
-        std::cout << "[Simulated Annealing] Ensamble Theta_comp (" << all_compatible.size() 
+        std::cout << "[Simulated Annealing] Ensamble Theta_comp (" << report.compatible_ensemble.size()
                   << " miembros) guardado en: " << checkpoint_csv_path << "\n";
+    }
+
+    const std::filesystem::path trace_path = ckpt_path.parent_path() / "sa_convergence_trace.csv";
+    std::ofstream trace_file(trace_path);
+    if (trace_file.is_open()) {
+        trace_file << "chain_id,iteration,temperature,j_current,j_best\n" << std::setprecision(7);
+        for (const auto& ch : report.chains) {
+            for (const auto& row : ch.trace) {
+                trace_file << ch.chain_id << "," << static_cast<int>(row[0]) << "," << row[1] << "," << row[2] << "," << row[3] << "\n";
+            }
+        }
+        std::cout << "[Simulated Annealing] Curva de convergencia guardada en: " << trace_path.string() << "\n";
     }
 
     return report;

@@ -49,6 +49,28 @@ struct DailyThermalGrid {
     std::vector<float> t2m_min;  ///< [365 * 81 * 101] en °C
     std::vector<float> t2m_mean; ///< [365 * 81 * 101] en °C
 
+    /// True si hay series NetCDF cargadas (si no, se usa la climatología analítica de respaldo)
+    [[nodiscard]] inline bool has_data() const noexcept {
+        return !t2m_min.empty() && !t2m_mean.empty();
+    }
+
+    /// Paso (en elementos) entre dos días consecutivos del mismo punto espacial
+    [[nodiscard]] inline size_t day_stride() const noexcept {
+        return static_cast<size_t>(n_lats) * static_cast<size_t>(n_lons);
+    }
+
+    /// Desplazamiento espacial (lat_idx * n_lons + lon_idx) calculado UNA sola vez por celda;
+    /// el valor del día d se lee en t2m_*[d * day_stride() + locate(lat, lon)].
+    [[nodiscard]] inline size_t locate(float lat, float lon) const noexcept {
+        int lat_idx = static_cast<int>((lat_max - lat) / dlat + 0.5f);
+        int lon_idx = static_cast<int>((lon - lon_min) / dlon + 0.5f);
+        if (lat_idx < 0) lat_idx = 0;
+        if (lat_idx >= n_lats) lat_idx = n_lats - 1;
+        if (lon_idx < 0) lon_idx = 0;
+        if (lon_idx >= n_lons) lon_idx = n_lons - 1;
+        return static_cast<size_t>(lat_idx) * static_cast<size_t>(n_lons) + static_cast<size_t>(lon_idx);
+    }
+
     inline void get_temp(int day_0idx, float lat, float lon, float& out_tmin, float& out_tmean) const noexcept {
         if (t2m_min.empty() || t2m_mean.empty()) {
             // Climatología de respaldo analítica si no hay NetCDF cargado

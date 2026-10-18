@@ -23,6 +23,7 @@
 
 #include <iostream>
 #include <iomanip>
+#include <sstream>
 #include <chrono>
 #include <cstdlib>
 #include <string>
@@ -311,6 +312,7 @@ int main(int argc, char* argv[]) {
     bool run_phase3_transect = false;
     bool run_phase3_morris = false;
     bool run_phase4_calibration = true;
+    bool phase4_only = false; // --phase4: solo calibración (omite los ciclos continentales de humo de Fase 1/2)
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -323,7 +325,7 @@ int main(int argc, char* argv[]) {
         else if (arg == "--transect") run_phase3_transect = true;
         else if (arg == "--morris") run_phase3_morris = true;
         else if (arg == "--phase3") { run_phase3_transect = true; run_phase3_morris = true; run_phase4_calibration = false; }
-        else if (arg == "--phase4") { run_phase3_transect = false; run_phase3_morris = false; run_phase4_calibration = true; }
+        else if (arg == "--phase4") { run_phase3_transect = false; run_phase3_morris = false; run_phase4_calibration = true; phase4_only = true; }
         else if (arg == "--no-calibration") run_phase4_calibration = false;
     }
 
@@ -376,12 +378,12 @@ int main(int argc, char* argv[]) {
     RunSummary cpu_summary;
     RunSummary gpu_summary;
 
-    if (target_engine == "cpu" || target_engine == "both") {
+    if (!phase4_only && (target_engine == "cpu" || target_engine == "both")) {
         cpu_summary = execute_continental_cycle("CPU Baseline (OpenMP AVX-512)", lpdm_cpu.get(),
                                                 grid_cells, atmosphere, winter_temps, summer_temps, config);
     }
 
-    if (target_engine == "gpu" || target_engine == "both") {
+    if (!phase4_only && (target_engine == "gpu" || target_engine == "both")) {
         gpu_summary = execute_continental_cycle("Intel Arc A380 (SYCL Device USM)", lpdm_gpu.get(),
                                                 grid_cells, atmosphere, winter_temps, summer_temps, config);
     }
@@ -431,15 +433,35 @@ int main(int argc, char* argv[]) {
             return EXIT_FAILURE;
         }
 
-        // Ejecutar las 5 cadenas de Markov (5 x 400 = 2,000 evaluaciones totales)
-        auto sa_report = joro::inference::run_multi_start_simulated_annealing(
-            grid_cells, daily_thermal, observations, 5, 400, 1.0, 0.05,
-            "/mnt/hpc_scratch/joro-hpc/checkpoints/theta_compatible_ensemble.csv");
+        // Forzamiento térmico diario ERA5 específico de cada año 2014..2019 (365 días x 81 x 101)
+        std::vector<joro::io::DailyThermalGrid> thermal_by_year(6);
+        for (int yi = 0; yi < 6; ++yi) {
+            if (!era5_reader.load_daily_thermal_year(2014 + yi, thermal_by_year[yi]) || !thermal_by_year[yi].has_data()) {
+                std::cerr << "[Fase 4] Error: no se pudo cargar la serie térmica diaria de " << (2014 + yi) << "\n";
+                return EXIT_FAILURE;
+            }
+        }
+        std::cout << "[ERA5] Series térmicas diarias 2014–2019 cargadas (una grilla por año).\n";
+
+        // Las 5 cadenas se ejecutan secuencialmente; cada evaluación usa la GPU (LPDM) y todos los hilos OpenMP.
+        joro::inference::SimulatedAnnealingReport sa_report;
+        int sa_chains = 5, sa_iters = 400; // Configuración oficial: 5 x 400 = 2,000 evaluaciones
+        if (const char* e = std::getenv("JORO_SA_CHAINS")) sa_chains = std::max(1, std::atoi(e));
+        if (const char* e = std::getenv("JORO_SA_ITERS")) sa_iters = std::max(10, std::atoi(e));
+        try {
+            sa_report = joro::inference::run_multi_start_simulated_annealing(
+                grid_cells, thermal_by_year, observations, lpdm_gpu.get(), sa_chains, sa_iters, 1.0, 0.05,
+                "/mnt/hpc_scratch/joro-hpc/checkpoints/theta_compatible_ensemble.csv");
+        } catch (const std::exception& e) {
+            std::cerr << "[Fase 4] ERROR: " << e.what() << "\n";
+            return EXIT_FAILURE;
+        }
 
         // ─────────────────────────────────────────────────────────────────────
         // TABLA 4: DIAGNÓSTICO DE CONVERGENCIA DE LAS 5 CADENAS
         // ─────────────────────────────────────────────────────────────────────
         std::cout << "\nTABLA 4: DIAGNÓSTICO DE CONVERGENCIA DE LAS 5 CADENAS DE SIMULATED ANNEALING (2014–2019):\n";
+        std::cout << "  Componentes normalizados por la escala nominal (valor 1.0000 = costo en theta_nominal)\n";
         std::cout << "┌────────┬────────┬──────────────┬──────────────┬──────────────┬──────────────┬──────────────┬──────────────┬──────────────┐\n";
         std::cout << "│ Cadena │ Semilla│ Costo Inic J0│ Costo Min J* │ J_llegada    │ J_frente     │ J_persist    │ Aceptadas (%)│ Tiempo (s)   │\n";
         std::cout << "├────────┼────────┼──────────────┼──────────────┼──────────────┼──────────────┼──────────────┼──────────────┼──────────────┤\n";
@@ -470,7 +492,7 @@ int main(int argc, char* argv[]) {
         std::vector<std::string> descriptions = {
             "Umbral térmico crítico de letalidad invernal",
             "Tasa de acumulación de estrés térmico diario",
-            "Exponente de daño no lineal por frío extremo",
+            "Exponente DISCRETO de daño por frío {1,2,3}",
             "Capacidad de carga basal en hábitat promedio",
             "Fracción de juveniles que inician baloneo aéreo",
             "Viabilidad media de ootecas tras oviposición",
@@ -481,38 +503,95 @@ int main(int argc, char* argv[]) {
 
         for (size_t i = 0; i < joro::inference::CALIBRATION_PARAMS.size(); ++i) {
             const auto& def = joro::inference::CALIBRATION_PARAMS[i];
+            const bool is_beta = (static_cast<int>(i) == joro::inference::kBetaDamageIndex);
             std::stringstream ss_prior, ss_ci;
-            ss_prior << "[" << std::fixed << std::setprecision(2) << def.min_val << ", " << def.max_val << "]";
-            ss_ci << "[" << std::fixed << std::setprecision(3) << sa_report.p5_theta[i] << ", " << sa_report.p95_theta[i] << "]";
+            if (is_beta) {
+                ss_prior << "{1, 2, 3}";
+                ss_ci << "[" << static_cast<int>(sa_report.p5_theta[i]) << ", " << static_cast<int>(sa_report.p95_theta[i]) << "]";
+            } else {
+                ss_prior << "[" << std::fixed << std::setprecision(2) << def.min_val << ", " << def.max_val << "]";
+                ss_ci << "[" << std::fixed << std::setprecision(3) << sa_report.p5_theta[i] << ", " << sa_report.p95_theta[i] << "]";
+            }
+            const int prec = is_beta ? 0 : 3;
 
             std::cout << "│ " << std::left << std::setw(12) << def.name << " │ "
                       << std::setw(7) << def.symbol << " │ "
                       << std::right << std::setw(20) << ss_prior.str() << " │ "
-                      << std::setw(12) << std::fixed << std::setprecision(3) << sa_report.map_theta[i] << " │ "
-                      << std::setw(12) << std::fixed << std::setprecision(3) << sa_report.median_theta[i] << " │ "
+                      << std::setw(12) << std::fixed << std::setprecision(prec) << sa_report.map_theta[i] << " │ "
+                      << std::setw(12) << std::fixed << std::setprecision(prec) << sa_report.median_theta[i] << " │ "
                       << std::setw(23) << ss_ci.str() << " │ "
                       << std::left << std::setw(40) << descriptions[i] << std::right << " │\n";
         }
         std::cout << "└──────────────┴─────────┴──────────────────────┴──────────────┴──────────────┴─────────────────────────┴──────────────────────────────────────────┘\n";
-        std::cout << "  ✔ Miembros aceptados en conjunto compatible Theta_comp (Delta <= 0.05): " 
+        std::cout << "  ✔ Miembros en conjunto compatible Theta_comp (Delta <= 0.05, sobre todas las evaluaciones): " 
                   << sa_report.compatible_ensemble.size() << " soluciones\n";
 
         // ─────────────────────────────────────────────────────────────────────
         // TABLA 6: ANÁLISIS DE SENSIBILIDAD A PESOS MULTICRITERIO
         // ─────────────────────────────────────────────────────────────────────
+        auto robustness = [](double pct) -> std::string {
+            if (pct >= 70.0) return "ROBUSTO (>=70%) ✔";
+            if (pct >= 50.0) return "MODERADO (50-70%) ~";
+            return "SENSIBLE (<50%) ⚠";
+        };
+        const auto& base_c = sa_report.map_components;
+        (void)base_c;
         std::cout << "\nTABLA 6: ANALISIS DE SENSIBILIDAD DEL CONJUNTO COMPATIBLE FRENTE A PESOS MULTICRITERIO:\n";
-        std::cout << "┌──────────────────────────────┬─────────────────────────┬──────────────────────────────┬──────────────────────┬──────────────────────┐\n";
-        std::cout << "│ Configuración de Pesos       │ Vector (w1, w2, w3)     │ Énfasis Prioritario          │ Retención Theta_comp │ Diagnóstico          │\n";
-        std::cout << "├──────────────────────────────┼─────────────────────────┼──────────────────────────────┼──────────────────────┼──────────────────────┤\n";
-        std::cout << "│ Configuración Base (Equal)   │ (0.333, 0.333, 0.334)   │ Multicriterio Equilibrado    │               100.0% │ Referencia Nominal   │\n";
-        std::cout << "│ Configuración A (Frente)     │ (0.200, 0.600, 0.200)   │ Dispersión y Onda de Frente  │ " 
-                  << std::setw(19) << std::fixed << std::setprecision(1) << sa_report.retention_rate_config_a << "% │ ROBUSTO (>70%) ✔     │\n";
-        std::cout << "│ Configuración B (Persist.)   │ (0.200, 0.200, 0.600)   │ Nicho Térmico y Demografía   │ " 
-                  << std::setw(19) << std::fixed << std::setprecision(1) << sa_report.retention_rate_config_b << "% │ ROBUSTO (>70%) ✔     │\n";
-        std::cout << "└──────────────────────────────┴─────────────────────────┴──────────────────────────────┴──────────────────────┴──────────────────────┘\n";
+        std::cout << "  (Theta_comp^A y Theta_comp^B reconstruidos sobre todas las evaluaciones con su propio J_min)\n";
+        std::cout << "┌──────────────────────────────┬─────────────────────────┬──────────────┬──────────────────────┬──────────────────────┐\n";
+        std::cout << "│ Configuración de Pesos       │ Vector (w1, w2, w3)     │ J_min        │ Retención Theta_comp │ Diagnóstico          │\n";
+        std::cout << "├──────────────────────────────┼─────────────────────────┼──────────────┼──────────────────────┼──────────────────────┤\n";
+        std::cout << "│ Configuración Base (Equal)   │ (0.333, 0.333, 0.334)   │ " << std::setw(12) << std::fixed << std::setprecision(4)
+                  << sa_report.global_min_cost << " │               100.0% │ Referencia Nominal   │\n";
+        std::cout << "│ Configuración A (Frente)     │ (0.200, 0.600, 0.200)   │ " << std::setw(12) << std::fixed << std::setprecision(4)
+                  << sa_report.j_min_config_a << " │ " << std::setw(19) << std::fixed << std::setprecision(1) << sa_report.retention_rate_config_a
+                  << "% │ " << std::left << std::setw(20) << robustness(sa_report.retention_rate_config_a) << std::right << " │\n";
+        std::cout << "│ Configuración B (Persist.)   │ (0.200, 0.200, 0.600)   │ " << std::setw(12) << std::fixed << std::setprecision(4)
+                  << sa_report.j_min_config_b << " │ " << std::setw(19) << std::fixed << std::setprecision(1) << sa_report.retention_rate_config_b
+                  << "% │ " << std::left << std::setw(20) << robustness(sa_report.retention_rate_config_b) << std::right << " │\n";
+        std::cout << "└──────────────────────────────┴─────────────────────────┴──────────────┴──────────────────────┴──────────────────────┘\n";
+
+        // ─────────────────────────────────────────────────────────────────────
+        // TABLA 7: TELEMETRÍA HÍBRIDA CPU (OpenMP + AVX-512) + GPU (SYCL / Level-Zero)
+        // ─────────────────────────────────────────────────────────────────────
+        constexpr double kLpdmStepsPerEval = 60.0;
+        std::cout << "\nTABLA 7: TELEMETRÍA HÍBRIDA CPU (" << sa_report.omp_max_threads << " hilos OpenMP) + GPU (" << sa_report.device_description << "):\n";
+        std::cout << "┌────────┬──────────┬──────────┬──────────┬──────────┬──────────┬──────────┬──────────┬────────────┬──────────────┐\n";
+        std::cout << "│ Cadena │ Total(s) │ ABM CPU  │ GPU kern │ H2D+D2H  │ LPDM host│ Costo CPU│ GPU kern │ Super-part │ Mpart/s      │\n";
+        std::cout << "│        │          │ (s)      │ (s)      │ (s)      │ (s)      │ (s)      │ % wall   │ (millones) │ (kernel GPU) │\n";
+        std::cout << "├────────┼──────────┼──────────┼──────────┼──────────┼──────────┼──────────┼──────────┼────────────┼──────────────┤\n";
+        auto print_tel_row = [&](const std::string& label, double wall, const joro::inference::ChainTelemetry& t) {
+            const double mps = (t.lpdm_kernel_time_s > 0.0) ? (static_cast<double>(t.particles_dispatched) / t.lpdm_kernel_time_s / 1.0e6) : 0.0;
+            std::cout << "│ " << std::setw(6) << label << " │ "
+                      << std::setw(8) << std::fixed << std::setprecision(2) << wall << " │ "
+                      << std::setw(8) << t.abm_time_s << " │ "
+                      << std::setw(8) << t.lpdm_kernel_time_s << " │ "
+                      << std::setw(8) << (t.lpdm_h2d_time_s + t.lpdm_d2h_time_s) << " │ "
+                      << std::setw(8) << (t.lpdm_init_time_s + t.lpdm_reduce_time_s) << " │ "
+                      << std::setw(8) << t.cost_time_s << " │ "
+                      << std::setw(7) << std::setprecision(1) << (wall > 0.0 ? 100.0 * t.lpdm_kernel_time_s / wall : 0.0) << "% │ "
+                      << std::setw(10) << std::setprecision(2) << (static_cast<double>(t.particles_dispatched) / 1.0e6) << " │ "
+                      << std::setw(12) << std::setprecision(2) << mps << " │\n";
+        };
+        for (const auto& ch : sa_report.chains) print_tel_row(std::to_string(ch.chain_id), ch.execution_time_s, ch.telemetry);
+        std::cout << "├────────┼──────────┼──────────┼──────────┼──────────┼──────────┼──────────┼──────────┼────────────┼──────────────┤\n";
+        print_tel_row("TOTAL", sa_report.total_runtime_s, sa_report.telemetry_total);
+        std::cout << "└────────┴──────────┴──────────┴──────────┴──────────┴──────────┴──────────┴──────────┴────────────┴──────────────┘\n";
+        {
+            const auto& tt = sa_report.telemetry_total;
+            const double kern_mps_steps = (tt.lpdm_kernel_time_s > 0.0)
+                ? (static_cast<double>(tt.particles_dispatched) * kLpdmStepsPerEval / tt.lpdm_kernel_time_s / 1.0e6) : 0.0;
+            double tmin = 1e18, tmax = 0.0, tsum = 0.0;
+            for (const auto& ch : sa_report.chains) { tmin = std::min(tmin, ch.execution_time_s); tmax = std::max(tmax, ch.execution_time_s); tsum += ch.execution_time_s; }
+            const double tmean = tsum / static_cast<double>(sa_report.chains.size());
+            std::cout << "  ✔ Despachos GPU: " << std::setprecision(0) << static_cast<double>(tt.evaluations) << " evaluaciones | despachos con fallback a CPU: "
+                      << tt.cpu_fallbacks << "\n";
+            std::cout << "  ✔ Throughput del kernel GPU: " << std::setprecision(2) << kern_mps_steps << " M part-pasos/s (60 pasos de 60 s)\n";
+            std::cout << "  ✔ Balance entre cadenas: min " << std::setprecision(2) << tmin << " s | media " << tmean << " s | max " << tmax
+                      << " s | max/min = " << (tmin > 0.0 ? tmax / tmin : 0.0) << "\n";
+        }
     }
 
     std::cout << "\n✔ Fase 4 completada exitosamente.\n";
     return EXIT_SUCCESS;
 }
-

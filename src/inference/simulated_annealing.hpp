@@ -6,6 +6,7 @@
 #include "io/era5_netcdf_reader.hpp"
 #include "inference/cost_function.hpp"
 #include "inference/occupancy_model.hpp"
+#include <array>
 #include <string>
 #include <vector>
 
@@ -21,6 +22,27 @@ struct CalibrationParamDef {
 
 extern const std::vector<CalibrationParamDef> CALIBRATION_PARAMS;
 
+/// Índice de beta_s dentro del vector theta (variable DISCRETA en {1, 2, 3})
+constexpr int kBetaDamageIndex = 2;
+
+/// Telemetría de un tramo de cómputo (una cadena o el total de la calibración)
+struct ChainTelemetry {
+    uint64_t evaluations = 0;
+    double abm_time_s = 0.0;           ///< ABM (OpenMP + AVX-512): invierno, desarrollo Q10, reproducción
+    double lpdm_init_time_s = 0.0;     ///< Inicialización de super-partículas (host)
+    double lpdm_h2d_time_s = 0.0;      ///< Host -> Device USM
+    double lpdm_kernel_time_s = 0.0;   ///< Kernel SYCL en la GPU
+    double lpdm_d2h_time_s = 0.0;      ///< Device USM -> host
+    double lpdm_reduce_time_s = 0.0;   ///< Reducción de aterrizajes (host)
+    double cost_time_s = 0.0;          ///< Ocupación latente + detección + reducción del costo (OpenMP)
+    uint64_t particles_dispatched = 0; ///< Super-partículas integradas en la GPU
+    uint64_t cpu_fallbacks = 0;        ///< Despachos que NO se ejecutaron en la GPU (debe ser 0)
+
+    [[nodiscard]] double lpdm_total_s() const noexcept {
+        return lpdm_init_time_s + lpdm_h2d_time_s + lpdm_kernel_time_s + lpdm_d2h_time_s + lpdm_reduce_time_s;
+    }
+};
+
 struct ChainConvergenceRecord {
     int chain_id = 0;
     uint32_t seed = 0;
@@ -31,6 +53,10 @@ struct ChainConvergenceRecord {
     double execution_time_s = 0.0;
     std::vector<float> best_theta;
     CostComponents best_components;
+    CostComponents initial_components;
+    ChainTelemetry telemetry;
+    /// Traza de convergencia: (iteración, temperatura, costo actual, costo mínimo hasta la fecha)
+    std::vector<std::array<double, 4>> trace;
 };
 
 struct CompatibleEnsembleMember {
@@ -46,6 +72,19 @@ struct CompatibleEnsembleMember {
     std::vector<float> theta;
 };
 
+/// Resumen de la partición balanceada del conjunto de calibración (para el informe)
+struct CalibrationStratification {
+    uint64_t n_rows = 0;
+    uint64_t arrival_pos = 0;      ///< Y_t=1, Y_{t-1}=0  (colonizaciones observadas)
+    uint64_t arrival_neg = 0;      ///< Y_t=0, Y_{t-1}=0 dentro de la envolvente activa
+    uint64_t persistence_pos = 0;  ///< Y_t=1, Y_{t-1}=1
+    uint64_t persistence_neg = 0;  ///< Y_t=0, Y_{t-1}=1
+    uint64_t outside_envelope = 0; ///< Ausencias lejanas excluidas del Brier de llegada
+    std::vector<double> envelope_radius_km;   ///< Radio de la envolvente por año (2014..2019)
+    std::vector<double> observed_front_km;    ///< P95 observado de distancia al epicentro por año
+    uint64_t effort_imputed_rows = 0;         ///< Filas con Y=1 cuyo esfuerzo se imputó (ver informe)
+};
+
 struct SimulatedAnnealingReport {
     int n_chains = 5;
     int iter_per_chain = 400;
@@ -56,7 +95,7 @@ struct SimulatedAnnealingReport {
     CostComponents map_components;
     std::vector<ChainConvergenceRecord> chains;
     std::vector<CompatibleEnsembleMember> compatible_ensemble;
-    
+
     // Estadísticas de incertidumbre P5, Mediana, P95
     std::vector<float> p5_theta;
     std::vector<float> median_theta;
@@ -65,6 +104,18 @@ struct SimulatedAnnealingReport {
     // Sensibilidad a pesos alternativos
     double retention_rate_config_a = 0.0;
     double retention_rate_config_b = 0.0;
+    double j_min_config_a = 0.0;
+    double j_min_config_b = 0.0;
+
+    // Escalas de referencia y costo nominal
+    CostReferenceScales reference_scales;
+    CostComponents nominal_components;
+    CalibrationStratification stratification;
+
+    // Telemetría híbrida CPU + GPU
+    ChainTelemetry telemetry_total;
+    std::string device_description;
+    int omp_max_threads = 1;
 };
 
 /// Carga el conjunto de calibración observacional (2014-2019)
@@ -84,11 +135,16 @@ struct CalibrationObservation {
 
 std::vector<CalibrationObservation> load_calibration_dataset(const std::string& csv_path);
 
-/// Ejecuta el algoritmo de Recocido Simulado Multi-inicio (5 cadenas independientes)
+/// Ejecuta el algoritmo de Recocido Simulado Multi-inicio (5 cadenas INDEPENDIENTES ejecutadas
+/// de forma SECUENCIAL). Cada evaluación del simulador acoplado usa el 100 % del hardware:
+/// LPDM en la GPU (kernel SYCL sobre Device USM persistente) y ABM/ocupación/costo con todos
+/// los hilos OpenMP del host. `thermal_by_year[i]` es el forzamiento diario ERA5 del año 2014+i.
+/// `lpdm_engine` debe ser un motor GPU SYCL (se aborta si no hay offload a GPU).
 SimulatedAnnealingReport run_multi_start_simulated_annealing(
     const std::vector<GridCell>& grid_cells,
-    const io::DailyThermalGrid& thermal,
+    const std::vector<io::DailyThermalGrid>& thermal_by_year,
     const std::vector<CalibrationObservation>& observations,
+    lpdm::LpdmEngine* lpdm_engine,
     int n_chains = 5,
     int iter_per_chain = 400,
     double initial_temp = 1.0,
