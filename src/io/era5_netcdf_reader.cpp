@@ -1,4 +1,5 @@
 #include "io/era5_netcdf_reader.hpp"
+#include <cstdlib>
 #include <iostream>
 #include <cmath>
 
@@ -24,19 +25,35 @@ float Era5NetCdfReader::omega_to_w(float omega, float pressure_pa, float temp_k)
     return static_cast<float>(num / den);
 }
 
+bool Era5NetCdfReader::year_allowed(int year) {
+    if (year <= kLastCalibrationYear) return true;
+    const char* unlock = std::getenv("JORO_UNLOCK_PHASE5");
+    if (unlock != nullptr && std::string(unlock) == "1") return true;
+    blocked_years_.push_back(year);
+    std::cerr << "[ERA5] BLOQUEADO: el año " << year << " pertenece a la ventana 2020-2024 reservada para la Fase 5 "
+              << "(no se carga en memoria).\n";
+    return false;
+}
+
 bool Era5NetCdfReader::load_month(int year, int month, AtmosphericField3D& field) {
+    if (!year_allowed(year)) return false;
 #if defined(JORO_HAS_NETCDF)
     std::string filename_3d = data_dir_ + "/era5_uvwt_" + std::to_string(year) +
                               "_" + (month < 10 ? "0" : "") + std::to_string(month) + ".nc";
     int ncid_3d = 0;
     int status = nc_open(filename_3d.c_str(), NC_NOWRITE, &ncid_3d);
-    if (status != NC_NOERR) {
+    if (status != NC_NOERR && !strict_) {
         // Intento con sufijo de día (_01.nc)
         filename_3d = data_dir_ + "/era5_uvwt_" + std::to_string(year) +
                       "_" + (month < 10 ? "0" : "") + std::to_string(month) + "_01.nc";
         status = nc_open(filename_3d.c_str(), NC_NOWRITE, &ncid_3d);
     }
-
+    if (status == NC_NOERR) files_read_.push_back(filename_3d);
+    if (status != NC_NOERR && strict_) {
+        std::cerr << "[NetCDF] ERROR (modo estricto): no se pudo abrir " << filename_3d << " ("
+                  << nc_strerror(status) << ").\n";
+        return false;
+    }
     if (status == NC_NOERR) {
         int dimid_time = -1, dimid_level = -1, dimid_lat = -1, dimid_lon = -1;
         size_t n_times = 0, n_levels = 0, n_lats = 0, n_lons = 0;
@@ -76,6 +93,31 @@ bool Era5NetCdfReader::load_month(int year, int month, AtmosphericField3D& field
             nc_inq_varid(ncid_3d, "w", &varid_w);
             nc_inq_varid(ncid_3d, "t", &varid_t);
 
+            if (strict_) {
+                // Validación: variables presentes, almacenadas en float32 (sin scale_factor) y niveles en el orden esperado
+                bool ok = varid_u >= 0 && varid_v >= 0 && varid_w >= 0 && varid_t >= 0;
+                for (int vid : {varid_u, varid_v, varid_w, varid_t}) {
+                    nc_type xt = NC_NAT;
+                    if (vid >= 0 && (nc_inq_vartype(ncid_3d, vid, &xt) != NC_NOERR || xt != NC_FLOAT)) ok = false;
+                }
+                int varid_pl = -1;
+                if (nc_inq_varid(ncid_3d, "pressure_level", &varid_pl) == NC_NOERR && n_levels == field.pressure_levels_hpa.size()) {
+                    std::vector<double> pl(n_levels, 0.0);
+                    nc_get_var_double(ncid_3d, varid_pl, pl.data());
+                    for (size_t k = 0; k < n_levels; ++k) {
+                        if (std::abs(pl[k] - static_cast<double>(field.pressure_levels_hpa[k])) > 1e-3) ok = false;
+                    }
+                } else {
+                    ok = false;
+                }
+                if (!ok) {
+                    std::cerr << "[NetCDF] ERROR (modo estricto): " << filename_3d
+                              << " no contiene u,v,w,t en float32 sobre los 12 niveles 1000-700 hPa esperados.\n";
+                    nc_close(ncid_3d);
+                    return false;
+                }
+            }
+
             if (varid_u >= 0) nc_get_var_float(ncid_3d, varid_u, field.u.data());
             if (varid_v >= 0) nc_get_var_float(ncid_3d, varid_v, field.v.data());
             if (varid_w >= 0) nc_get_var_float(ncid_3d, varid_w, field.w.data());
@@ -101,7 +143,13 @@ bool Era5NetCdfReader::load_month(int year, int month, AtmosphericField3D& field
             std::string filename_sfc = data_dir_ + "/era5_sfc_" + std::to_string(year) +
                                        "_" + (month < 10 ? "0" : "") + std::to_string(month) + ".nc";
             int ncid_sfc = 0;
-            if (nc_open(filename_sfc.c_str(), NC_NOWRITE, &ncid_sfc) == NC_NOERR) {
+            const bool sfc_open = nc_open(filename_sfc.c_str(), NC_NOWRITE, &ncid_sfc) == NC_NOERR;
+            if (!sfc_open && strict_) {
+                std::cerr << "[NetCDF] ERROR (modo estricto): falta el archivo superficial " << filename_sfc << ".\n";
+                return false;
+            }
+            if (sfc_open) {
+                files_read_.push_back(filename_sfc);
                 size_t sfc_elements = n_times * n_lats * n_lons;
                 field.u10.resize(sfc_elements);
                 field.v10.resize(sfc_elements);
@@ -115,6 +163,19 @@ bool Era5NetCdfReader::load_month(int year, int month, AtmosphericField3D& field
                 nc_inq_varid(ncid_sfc, "sp", &varid_sp);
                 nc_inq_varid(ncid_sfc, "t2m", &varid_t2m);
                 nc_inq_varid(ncid_sfc, "blh", &varid_blh);
+                if (strict_) {
+                    bool ok = varid_u10 >= 0 && varid_v10 >= 0 && varid_sp >= 0 && varid_t2m >= 0 && varid_blh >= 0;
+                    for (int vid : {varid_u10, varid_v10, varid_sp, varid_t2m, varid_blh}) {
+                        nc_type xt = NC_NAT;
+                        if (vid >= 0 && (nc_inq_vartype(ncid_sfc, vid, &xt) != NC_NOERR || xt != NC_FLOAT)) ok = false;
+                    }
+                    if (!ok) {
+                        std::cerr << "[NetCDF] ERROR (modo estricto): " << filename_sfc
+                                  << " no contiene sp,t2m,u10,v10,blh en float32.\n";
+                        nc_close(ncid_sfc);
+                        return false;
+                    }
+                }
 
                 if (varid_u10 >= 0) nc_get_var_float(ncid_sfc, varid_u10, field.u10.data());
                 if (varid_v10 >= 0) nc_get_var_float(ncid_sfc, varid_v10, field.v10.data());
@@ -139,6 +200,12 @@ bool Era5NetCdfReader::load_month(int year, int month, AtmosphericField3D& field
                   << " (" << nc_strerror(status) << "). Usando inicialización sintética de respaldo.\n";
     }
 #endif
+
+    if (strict_) {
+        std::cerr << "[NetCDF] ERROR (modo estricto): carga ERA5 " << year << "-" << month
+                  << " fallida; no se admite la malla sintética de respaldo.\n";
+        return false;
+    }
 
     // Si NetCDF no está disponible en tiempo de compilación o falló el archivo, usar malla meteorológica base
     field.n_times = 744; // 31 días * 24 horas
@@ -174,6 +241,7 @@ void Era5NetCdfReader::interpolate_wind_3d(
 }
 
 bool Era5NetCdfReader::load_daily_thermal_year(int year, DailyThermalGrid& grid) {
+    if (!year_allowed(year)) return false;
     grid.n_days = 365;
     grid.n_lats = 81;
     grid.n_lons = 101;
@@ -182,10 +250,37 @@ bool Era5NetCdfReader::load_daily_thermal_year(int year, DailyThermalGrid& grid)
     grid.t2m_mean.resize(total_elements);
 
 #if defined(JORO_HAS_NETCDF)
+    // 1) Serie REAL por año (ERA5 daily statistics t2m): era5_daily_t2m_{year}.nc [día][lat][lon] en °C
+    {
+        const std::string path = data_dir_ + "/era5_daily_t2m_" + std::to_string(year) + ".nc";
+        int ncid = 0;
+        if (nc_open(path.c_str(), NC_NOWRITE, &ncid) == NC_NOERR) {
+            files_read_.push_back(path);
+            int varid_tmin = -1, varid_tmean = -1;
+            nc_inq_varid(ncid, "t2m_min", &varid_tmin);
+            nc_inq_varid(ncid, "t2m_mean", &varid_tmean);
+            bool ok = varid_tmin >= 0 && varid_tmean >= 0;
+            if (ok) {
+                ok = nc_get_var_float(ncid, varid_tmin, grid.t2m_min.data()) == NC_NOERR &&
+                     nc_get_var_float(ncid, varid_tmean, grid.t2m_mean.data()) == NC_NOERR;
+            }
+            nc_close(ncid);
+            if (ok) return true;
+            std::cerr << "[NetCDF] ERROR: " << path << " ilegible o incompleto.\n";
+        }
+    }
+    if (strict_) {
+        std::cerr << "[NetCDF] ERROR (modo estricto): falta la serie térmica diaria real de " << year << ".\n";
+        return false;
+    }
+
+    // 2) Archivo agregado heredado (Fases 1-3). OJO: la versión antigua era SINTÉTICA; si se conserva, debe
+    //    renombrarse. Solo se usa si no existe la serie real por año y el modo no es estricto.
     std::string thermal_nc = data_dir_ + "/era5_daily_t2m_2014_2019.nc";
     int ncid = 0;
     int status = nc_open(thermal_nc.c_str(), NC_NOWRITE, &ncid);
     if (status == NC_NOERR) {
+        files_read_.push_back(thermal_nc);
         int varid_tmin = -1, varid_tmean = -1;
         nc_inq_varid(ncid, "t2m_min", &varid_tmin);
         nc_inq_varid(ncid, "t2m_mean", &varid_tmean);
@@ -213,6 +308,8 @@ bool Era5NetCdfReader::load_daily_thermal_year(int year, DailyThermalGrid& grid)
         }
     }
 #endif
+
+    if (strict_) return false;
 
     // Climatología sintética si no hay NetCDF disponible
     for (int d = 0; d < grid.n_days; ++d) {

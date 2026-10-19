@@ -79,6 +79,14 @@ public:
     /// True si hay un campo ERA5 residente que gobierna el transporte
     [[nodiscard]] virtual bool is_atmosphere_resident() const noexcept { return false; }
 
+    /// Atmósferas interanuales: `add_atmosphere` agrega un campo ERA5 residente (índice = orden de
+    /// llamada, p. ej. 0 -> 2014 ... 5 -> 2019); `select_atmosphere(i)` elige el campo que gobierna los
+    /// siguientes despachos. `set_atmosphere` equivale a `clear_atmospheres()` + `add_atmosphere()`.
+    virtual void clear_atmospheres() {}
+    virtual bool add_atmosphere(const io::AtmosphericField3D& /*atmosphere*/) { return false; }
+    virtual bool select_atmosphere(size_t /*index*/) { return false; }
+    [[nodiscard]] virtual size_t atmosphere_count() const noexcept { return 0; }
+
     /// Presupuesto máximo de super-partículas por despacho anual; si se excede, se reduce su número
     /// y se escala su peso (la suma de pesos por celda se conserva exactamente). 0 = sin presupuesto.
     virtual void set_max_super_particles(size_t /*budget*/) {}

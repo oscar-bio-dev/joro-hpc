@@ -32,6 +32,14 @@ inline double seconds_since(Clock::time_point t0) {
 
 } // namespace
 
+/// Campo ERA5 de un año: copia empaquetada en host (metadatos de la vista) + punteros a Device USM.
+struct AtmSlot {
+    Era5Pack host;
+    Wind4* d_wind = nullptr;
+    float* d_blh = nullptr;
+    float* d_zg = nullptr;
+};
+
 /// Motor LPDM sobre GPU (SYCL / Level-Zero) con bucle de partículas "zero-copy":
 ///  * al dispositivo solo viaja la tabla compacta de celdas emisoras (EmissionJob, ~24 B por celda);
 ///  * cada work-item toma su super-partícula, integra la trayectoria completa en registros
@@ -75,37 +83,61 @@ public:
     void set_max_super_particles(size_t budget) override { max_super_ = budget; }
 
     bool set_atmosphere(const io::AtmosphericField3D& atmosphere) override {
+        clear_atmospheres();
+        return add_atmosphere(atmosphere);
+    }
+
+    void clear_atmospheres() override {
+#if defined(JORO_HAS_SYCL)
+        free_atmosphere_device();
+#endif
+        atms_.clear();
+        active_atm_ = 0;
+        atmosphere_resident_ = false;
+    }
+
+    bool add_atmosphere(const io::AtmosphericField3D& atmosphere) override {
         const auto t0 = Clock::now();
-        Era5Pack pack;
-        if (!pack.build(atmosphere)) return false;
-        era5_host_ = std::move(pack);
-        era5_host_.refresh_view();
+        AtmSlot slot;
+        if (!slot.host.build(atmosphere)) return false;
+        slot.host.refresh_view();
 #if defined(JORO_HAS_SYCL)
         if (q_) {
             try {
-                free_atmosphere_device();
-                d_wind_ = sycl::malloc_device<Wind4>(era5_host_.wind.size(), *q_);
-                d_blh_ = sycl::malloc_device<float>(era5_host_.blh.size(), *q_);
-                d_zg_ = sycl::malloc_device<float>(era5_host_.zground.size(), *q_);
-                if (!d_wind_ || !d_blh_ || !d_zg_) throw std::runtime_error("sin memoria de dispositivo para ERA5");
-                q_->memcpy(d_wind_, era5_host_.wind.data(), era5_host_.wind.size() * sizeof(Wind4));
-                q_->memcpy(d_blh_, era5_host_.blh.data(), era5_host_.blh.size() * sizeof(float));
-                q_->memcpy(d_zg_, era5_host_.zground.data(), era5_host_.zground.size() * sizeof(float)).wait();
+                slot.d_wind = sycl::malloc_device<Wind4>(slot.host.wind.size(), *q_);
+                slot.d_blh = sycl::malloc_device<float>(slot.host.blh.size(), *q_);
+                slot.d_zg = sycl::malloc_device<float>(slot.host.zground.size(), *q_);
+                if (!slot.d_wind || !slot.d_blh || !slot.d_zg) throw std::runtime_error("sin memoria de dispositivo para ERA5");
+                q_->memcpy(slot.d_wind, slot.host.wind.data(), slot.host.wind.size() * sizeof(Wind4));
+                q_->memcpy(slot.d_blh, slot.host.blh.data(), slot.host.blh.size() * sizeof(float));
+                q_->memcpy(slot.d_zg, slot.host.zground.data(), slot.host.zground.size() * sizeof(float)).wait();
             } catch (const std::exception& e) {
                 std::cerr << "[SYCL Note] No se pudo subir ERA5 al dispositivo (" << e.what()
                           << "); el transporte usará el campo en host.\n";
-                free_atmosphere_device();
+                free_slot_device(slot);
             }
         }
 #endif
+        atms_.push_back(std::move(slot));
+        atms_.back().host.refresh_view();
+        const AtmSlot& s = atms_.back();
+        active_atm_ = atms_.size() - 1;
         atmosphere_resident_ = true;
-        std::cout << "  [ERA5->USM] Campo atmosférico residente: " << era5_host_.view.n_t << " h x "
-                  << era5_host_.view.n_lev << " niveles x " << era5_host_.view.n_lat << " x " << era5_host_.view.n_lon
-                  << " | " << (static_cast<double>(era5_host_.bytes()) / 1.048576e6) << " MB"
-                  << (d_wind_ ? " en Device USM" : " en host") << " | carga única "
+        std::cout << "  [ERA5->USM] Campo atmosférico #" << atms_.size() << " residente: " << s.host.view.n_t << " h x "
+                  << s.host.view.n_lev << " niveles x " << s.host.view.n_lat << " x " << s.host.view.n_lon
+                  << " | " << (static_cast<double>(s.host.bytes()) / 1.048576e6) << " MB"
+                  << (s.d_wind ? " en Device USM" : " en host") << " | carga única "
                   << seconds_since(t0) << " s\n";
         return true;
     }
+
+    bool select_atmosphere(size_t idx) override {
+        if (idx >= atms_.size()) return false;
+        active_atm_ = idx;
+        return true;
+    }
+
+    [[nodiscard]] size_t atmosphere_count() const noexcept override { return atms_.size(); }
 
     [[nodiscard]] bool is_atmosphere_resident() const noexcept override { return atmosphere_resident_; }
 
@@ -245,11 +277,12 @@ public:
                 TraceParams dtp = tp;
                 dtp.grid = SpatialGridView{grid_view_host_.min_lon, grid_view_host_.min_lat, grid_view_host_.inv_cell,
                                            grid_view_host_.n_cols, grid_view_host_.n_rows, d_grid_};
-                if (atmosphere_resident_ && d_wind_) {
-                    dtp.atm = era5_host_.view;
-                    dtp.atm.wind = d_wind_;
-                    dtp.atm.blh = d_blh_;
-                    dtp.atm.zground = d_zg_;
+                if (atmosphere_resident_ && !atms_.empty() && atms_[active_atm_].d_wind) {
+                    const AtmSlot& as = atms_[active_atm_];
+                    dtp.atm = as.host.view;
+                    dtp.atm.wind = as.d_wind;
+                    dtp.atm.blh = as.d_blh;
+                    dtp.atm.zground = as.d_zg;
                 } else if (atmosphere_resident_) {
                     throw std::runtime_error("ERA5 no residente en el dispositivo");
                 }
@@ -364,7 +397,7 @@ public:
             std::fill(h_arrivals_.begin(), h_arrivals_.end(), 0u);
             TraceParams htp = tp;
             htp.grid = spatial_lookup_.view();
-            if (atmosphere_resident_) htp.atm = era5_host_.view;
+            if (atmosphere_resident_ && !atms_.empty()) htp.atm = atms_[active_atm_].host.view;
             const auto k_start = Clock::now();
             const int64_t n = static_cast<int64_t>(total_sim_);
             const int64_t n_jobs = static_cast<int64_t>(jobs_.size());
@@ -449,11 +482,17 @@ private:
         h_res_ = sycl::malloc_host<uint32_t>(words, q);
     }
 
+    static void free_slot_device_impl(AtmSlot& s, sycl::queue& q) {
+        if (s.d_wind) { sycl::free(s.d_wind, q); s.d_wind = nullptr; }
+        if (s.d_blh) { sycl::free(s.d_blh, q); s.d_blh = nullptr; }
+        if (s.d_zg) { sycl::free(s.d_zg, q); s.d_zg = nullptr; }
+    }
+
+    void free_slot_device(AtmSlot& s) { if (q_) free_slot_device_impl(s, *q_); }
+
     void free_atmosphere_device() {
         if (!q_) return;
-        if (d_wind_) { sycl::free(d_wind_, *q_); d_wind_ = nullptr; }
-        if (d_blh_) { sycl::free(d_blh_, *q_); d_blh_ = nullptr; }
-        if (d_zg_) { sycl::free(d_zg_, *q_); d_zg_ = nullptr; }
+        for (auto& s : atms_) free_slot_device_impl(s, *q_);
     }
 #endif
 
@@ -508,7 +547,8 @@ private:
     uint32_t* h_res_ = nullptr;           ///< Bloque de resultados anclado (pinned) para la copia D2H única
     EmissionJob* h_jobs_pin_ = nullptr;   ///< Tabla de celdas emisoras en memoria anclada (staging H2D)
 
-    Era5Pack era5_host_;
+    std::vector<AtmSlot> atms_;           ///< Un campo atmosférico residente por año (2014..2019)
+    size_t active_atm_ = 0;
     bool atmosphere_resident_ = false;
 
     EngineTelemetry tel_;
@@ -519,9 +559,6 @@ private:
     int32_t* d_grid_ = nullptr;
     EmissionJob* d_jobs_ = nullptr;       size_t cap_jobs_ = 0;
     uint32_t* d_res_ = nullptr;           size_t cap_wg_ = 0;  ///< [llegadas | histograma | parciales WG]
-    Wind4* d_wind_ = nullptr;
-    float* d_blh_ = nullptr;
-    float* d_zg_ = nullptr;
 #endif
 };
 

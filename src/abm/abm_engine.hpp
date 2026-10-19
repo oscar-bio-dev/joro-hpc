@@ -27,6 +27,8 @@ struct DemographicParameters {
     float gamma3_dosel = 0.30f;    ///< Sensibilidad a dosel arbóreo Z_dosel
     float k_min = 100.0f;          ///< Cota inferior
     float k_max = 50000.0f;        ///< Cota superior
+    float gamma_hab = 0.0f;        ///< Pendiente global sobre H_hab (M1; M0 ⇒ 0)
+    bool  use_hab_index = false;   ///< true: K_i = K0 exp(gamma_hab H_hab) (M0/M1); false: M3 (3 gammas)
 
     // Umbrales fenológicos de desarrollo
     float t_min_dev = 13.0f;       ///< Umbral mínimo de desarrollo (°C)

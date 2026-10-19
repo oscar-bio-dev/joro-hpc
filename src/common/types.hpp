@@ -54,6 +54,7 @@ struct GridCell {
     float z_dosel = 0.0f;
     float pop_density_h = 0.0f;
     float road_density_r = 0.0f;
+    float h_hab = 0.0f;       ///< Índice compuesto de hábitat H_i^hab (varianza unitaria; ver abm/carrying_capacity.hpp)
     int16_t ecoregion_block = 0;
     bool is_seed = false;
 };

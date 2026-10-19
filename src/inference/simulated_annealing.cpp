@@ -23,17 +23,43 @@ namespace joro::inference {
 // quedan fijos en F = 450.0 y Q10 = 2.2. beta_s es DISCRETO en {1, 2, 3} (Sección 8.3 del
 // anteproyecto, configs/priors_bounds.toml: beta_damage_candidates); su rango [1,3] solo delimita el
 // conjunto de candidatos y el optimizador únicamente propone saltos enteros entre ellos.
+//
+// Fase 4.5: K_i se reparametriza con DOS parámetros ortogonales (K0, gamma_hab) sobre el índice
+// compuesto H_hab, y el enlace de ocupación incorpora el intercepto de colonización a0 y el de
+// persistencia b0 (acoplan la escala numérica de A_{i,t}, N_{i,t} con P_hat(Y=1) del Brier).
+namespace {
+const CalibrationParamDef kTc       {"t_c",          "T_c,s",       -5.0f,     0.0f,   -3.5f};
+const CalibrationParamDef kAlpha    {"alpha_damage", "alpha_s",      0.01f,    0.10f,   0.04f};
+const CalibrationParamDef kBeta     {"beta_damage",  "beta_s",       1.0f,     3.0f,    2.0f};
+const CalibrationParamDef kK0       {"k0",           "K0",        1000.0f, 15000.0f, 5000.0f};
+const CalibrationParamDef kGammaHab {"gamma_hab",    "gamma_hab",    0.0f,     2.0f,    0.5f};
+const CalibrationParamDef kQBalloon {"q_balloon",    "q_balloon",    0.10f,    0.60f,   0.35f};
+const CalibrationParamDef kQViab    {"q_viab",       "q_viab",       0.20f,    0.90f,   0.65f};
+const CalibrationParamDef kA0       {"a0",           "a0",          -6.0f,    -1.0f,   -4.0f};
+const CalibrationParamDef kB0       {"b0",           "b0",          -2.0f,     2.5f,    1.5f};
+const CalibrationParamDef kG1       {"gamma1_imp",   "gamma_1",      0.10f,    1.00f,   0.45f};
+const CalibrationParamDef kG2       {"gamma2_borde", "gamma_2",      0.20f,    1.20f,   0.65f};
+const CalibrationParamDef kG3       {"gamma3_dosel", "gamma_3",      0.05f,    0.80f,   0.30f};
+} // namespace
+
 const std::vector<CalibrationParamDef> CALIBRATION_PARAMS = {
-    {"t_c",           "T_c,s",     -5.0f,     0.0f,    -3.5f},
-    {"alpha_damage",  "alpha_s",   0.01f,    0.10f,    0.04f},
-    {"beta_damage",   "beta_s",     1.0f,     3.0f,     2.0f},
-    {"k0",            "K0",      1000.0f, 20000.0f,  5000.0f},
-    {"q_balloon",     "q_balloon", 0.10f,    0.60f,    0.35f},
-    {"q_viab",        "q_viab",    0.20f,    0.90f,    0.65f},
-    {"gamma1_imp",    "gamma_1",   0.10f,    1.00f,    0.45f},
-    {"gamma2_borde",  "gamma_2",   0.20f,    1.20f,    0.65f},
-    {"gamma3_dosel",  "gamma_3",   0.05f,    0.80f,    0.30f}
-};
+    kTc, kAlpha, kBeta, kK0, kGammaHab, kQBalloon, kQViab, kA0, kB0};
+
+const std::vector<CalibrationParamDef>& calibration_params_for(abm::CarryingModel model) {
+    static const std::vector<CalibrationParamDef> m0 = {kTc, kAlpha, kBeta, kK0, kQBalloon, kQViab, kA0, kB0};
+    static const std::vector<CalibrationParamDef> m3 = {kTc, kAlpha, kBeta, kK0, kQBalloon, kQViab, kA0, kB0,
+                                                        kG1, kG2, kG3};
+    switch (model) {
+        case abm::CarryingModel::M0: return m0;
+        case abm::CarryingModel::M3: return m3;
+        default:                     return CALIBRATION_PARAMS;
+    }
+}
+
+int calibration_param_index(const std::vector<CalibrationParamDef>& defs, const std::string& name) {
+    for (size_t i = 0; i < defs.size(); ++i) if (defs[i].name == name) return static_cast<int>(i);
+    return -1;
+}
 
 namespace {
 
@@ -244,7 +270,28 @@ struct EvalContext {
     std::vector<int32_t> touched;          // cell_ids tocados (limpieza dispersa)
 
     ChainTelemetry tel;                    // contadores acumulados (ABM / costo)
+
+    // Modelo de capacidad de carga y posición de cada parámetro dentro de theta (-1 si no aplica)
+    abm::CarryingModel model = abm::CarryingModel::M1;
+    int i_tc = -1, i_alpha = -1, i_beta = -1, i_k0 = -1, i_gamma_hab = -1, i_q_balloon = -1, i_q_viab = -1,
+        i_a0 = -1, i_b0 = -1, i_g1 = -1, i_g2 = -1, i_g3 = -1;
+    size_t n_atmospheres = 0;              // campos ERA5 anuales residentes en el motor LPDM
 };
+
+void bind_param_indices(EvalContext& ctx, const std::vector<CalibrationParamDef>& defs) {
+    ctx.i_tc = calibration_param_index(defs, "t_c");
+    ctx.i_alpha = calibration_param_index(defs, "alpha_damage");
+    ctx.i_beta = calibration_param_index(defs, "beta_damage");
+    ctx.i_k0 = calibration_param_index(defs, "k0");
+    ctx.i_gamma_hab = calibration_param_index(defs, "gamma_hab");
+    ctx.i_q_balloon = calibration_param_index(defs, "q_balloon");
+    ctx.i_q_viab = calibration_param_index(defs, "q_viab");
+    ctx.i_a0 = calibration_param_index(defs, "a0");
+    ctx.i_b0 = calibration_param_index(defs, "b0");
+    ctx.i_g1 = calibration_param_index(defs, "gamma1_imp");
+    ctx.i_g2 = calibration_param_index(defs, "gamma2_borde");
+    ctx.i_g3 = calibration_param_index(defs, "gamma3_dosel");
+}
 
 CostComponents evaluate_candidate(
     EvalContext& ctx,
@@ -259,15 +306,26 @@ CostComponents evaluate_candidate(
     abm::DemographicParameters p;
     p.fecundity_F   = 450.0f; // Fijo empírico (Morris, baja sensibilidad)
     p.q10           = 2.2f;   // Fijo empírico
-    p.t_c           = theta[0];
-    p.alpha_damage  = theta[1];
-    p.beta_damage   = std::clamp(static_cast<int>(std::lround(theta[kBetaDamageIndex])), 1, 3); // entero estricto
-    p.k0            = theta[3];
-    p.q_balloon     = theta[4];
-    p.q_viab        = theta[5];
-    p.gamma1_imp    = theta[6];
-    p.gamma2_borde  = theta[7];
-    p.gamma3_dosel  = theta[8];
+    p.t_c           = theta[ctx.i_tc];
+    p.alpha_damage  = theta[ctx.i_alpha];
+    p.beta_damage   = std::clamp(static_cast<int>(std::lround(theta[ctx.i_beta])), 1, 3); // entero estricto
+    p.q_balloon     = theta[ctx.i_q_balloon];
+    p.q_viab        = theta[ctx.i_q_viab];
+    p.k0            = theta[ctx.i_k0];
+    if (ctx.model == abm::CarryingModel::M3) {
+        p.use_hab_index = false;
+        p.gamma1_imp    = theta[ctx.i_g1];
+        p.gamma2_borde  = theta[ctx.i_g2];
+        p.gamma3_dosel  = theta[ctx.i_g3];
+    } else {
+        p.use_hab_index = true;                       // K_i = K0 exp(gamma_hab H_hab); M0 ⇒ gamma_hab = 0
+        p.gamma_hab     = (ctx.model == abm::CarryingModel::M0) ? 0.0f : theta[ctx.i_gamma_hab];
+    }
+
+    // Enlace de ocupación (Sección 9): a0 (colonización) y b0 (persistencia) son calibrables
+    OccupancyParameters occ;
+    occ.a0 = theta[ctx.i_a0];
+    occ.b0 = theta[ctx.i_b0];
 
     abm::AbmEngine abm(p);
     abm.set_cell_index(ctx.cidx);
@@ -299,7 +357,8 @@ CostComponents evaluate_candidate(
         }
         ctx.tel.abm_time_s += elapsed_s(t_abm0);
 
-        // ── LPDM en la GPU (Device USM persistente) ──
+        // ── LPDM en la GPU (Device USM persistente): ERA5 REAL del año simulado (2014+yi) ──
+        if (ctx.n_atmospheres > 0) ctx.lpdm->select_atmosphere(std::min(static_cast<size_t>(yi), ctx.n_atmospheres - 1));
         ctx.lpdm->initialize_particles(grid, spring.ballooners_per_cell);
         auto disp = ctx.lpdm->run_dispersion(ctx.atmo, kLpdmDt, kLpdmSteps);
 
@@ -341,8 +400,8 @@ CostComponents evaluate_candidate(
             const float D = ctx.dcnt[cid] ? ctx.dsum[cid] / static_cast<float>(ctx.dcnt[cid]) : 0.0f;
 
             // logit(gamma) = a0 + a1 log(1 + A) + a2 H ;  logit(phi) = b0 + b1 log(1 + N) - b2 D
-            const float gamma = compute_colonization_gamma(ctx.arr[cid], cal.h_norm[r]);
-            const float phi = compute_persistence_phi(ctx.adult[cid], D);
+            const float gamma = compute_colonization_gamma(ctx.arr[cid], cal.h_norm[r], occ);
+            const float phi = compute_persistence_phi(ctx.adult[cid], D, occ);
             const int32_t s = cal.slot[r];
             // psi_t = (1 - psi_{t-1}) gamma + psi_{t-1} phi   (cada slot aparece una sola vez por año)
             const float psi_cur = update_dynamic_occupancy(psi[s], gamma, phi);
@@ -472,9 +531,13 @@ SimulatedAnnealingReport run_multi_start_simulated_annealing(
     int iter_per_chain,
     double initial_temp,
     double delta_threshold,
-    const std::string& checkpoint_csv_path)
+    const std::string& checkpoint_csv_path,
+    abm::CarryingModel model)
 {
     SimulatedAnnealingReport report;
+    const std::vector<CalibrationParamDef>& defs = calibration_params_for(model);
+    report.model = model;
+    report.params = defs;
     report.n_chains = n_chains;
     report.iter_per_chain = iter_per_chain;
     report.total_evaluations = n_chains * iter_per_chain;
@@ -493,7 +556,7 @@ SimulatedAnnealingReport run_multi_start_simulated_annealing(
                                  "). Defina JORO_ALLOW_CPU_FALLBACK=1 solo para depuración.");
     }
 
-    const int n_params = static_cast<int>(CALIBRATION_PARAMS.size());
+    const int n_params = static_cast<int>(defs.size());
     const char* env_threads = std::getenv("OMP_NUM_THREADS");
     const char* env_bind = std::getenv("OMP_PROC_BIND");
     const char* env_places = std::getenv("OMP_PLACES");
@@ -503,7 +566,7 @@ SimulatedAnnealingReport run_multi_start_simulated_annealing(
     std::cout << "  Cadenas independientes  : " << n_chains << " multi-start (ejecución SECUENCIAL)\n";
     std::cout << "  Iteraciones por cadena  : " << iter_per_chain << " iter\n";
     std::cout << "  Total evaluaciones 2014-2019 : " << report.total_evaluations << "\n";
-    std::cout << "  Espacio de parámetros   : " << n_params << " dimensiones dominantes (beta_s discreto {1,2,3})\n";
+    std::cout << "  Espacio de parámetros   : " << n_params << " dimensiones dominantes (beta_s discreto {1,2,3}) | modelo K_i = " << abm::carrying_model_name(model) << "\n";
     std::cout << "  Temperatura inicial T0  : " << initial_temp << "\n";
     std::cout << "  Tolerancia Delta (Theta_comp) : " << delta_threshold << "\n";
     std::cout << "  Dispositivo LPDM        : " << report.device_description << "\n";
@@ -541,6 +604,10 @@ SimulatedAnnealingReport run_multi_start_simulated_annealing(
     ctx.thermal = &thermal_by_year;
     ctx.cal = &cal;
     ctx.lpdm = lpdm_engine;
+    ctx.model = model;
+    bind_param_indices(ctx, defs);
+    ctx.n_atmospheres = lpdm_engine->atmosphere_count();
+    report.atmosphere_slots = ctx.n_atmospheres;
     ctx.atmo.n_times = kLpdmSteps;
     ctx.arr.assign(cidx.idx_of.size(), 0);
     ctx.adult.assign(cidx.idx_of.size(), 0.0f);
@@ -553,7 +620,7 @@ SimulatedAnnealingReport run_multi_start_simulated_annealing(
 
     // 1. Escalas de referencia en el punto nominal (theta_default); sirve además de calentamiento de la GPU
     std::vector<float> theta_nominal(n_params);
-    for (int i = 0; i < n_params; ++i) theta_nominal[i] = CALIBRATION_PARAMS[i].default_val;
+    for (int i = 0; i < n_params; ++i) theta_nominal[i] = defs[i].default_val;
 
     std::cout << "[Simulated Annealing] Evaluando escala de referencia inicial en theta_nominal...\n";
     CostReferenceScales unit_scales{1.0, 1.0, 1.0};
@@ -612,8 +679,8 @@ SimulatedAnnealingReport run_multi_start_simulated_annealing(
             curr_theta = theta_nominal;
         } else {
             for (int i = 0; i < n_params; ++i) {
-                const float min_v = CALIBRATION_PARAMS[i].min_val;
-                const float max_v = CALIBRATION_PARAMS[i].max_val;
+                const float min_v = defs[i].min_val;
+                const float max_v = defs[i].max_val;
                 if (i == kBetaDamageIndex) {
                     curr_theta[i] = static_cast<float>(1 + std::min(2, static_cast<int>(dist_01(rng) * 3.0))); // {1,2,3}
                 } else {
@@ -650,10 +717,10 @@ SimulatedAnnealingReport run_multi_start_simulated_annealing(
                     prop_theta[i] = static_cast<float>(new_b);
                     continue;
                 }
-                const float span = CALIBRATION_PARAMS[i].max_val - CALIBRATION_PARAMS[i].min_val;
+                const float span = defs[i].max_val - defs[i].min_val;
                 const double step = norm_dist(rng) * 0.12 * span * temp_ratio;
                 const float val = curr_theta[i] + static_cast<float>(step);
-                prop_theta[i] = std::clamp(val, CALIBRATION_PARAMS[i].min_val, CALIBRATION_PARAMS[i].max_val);
+                prop_theta[i] = std::clamp(val, defs[i].min_val, defs[i].max_val);
             }
 
             CostComponents prop_comp = evaluate_candidate(ctx, prop_theta, reference_scales, weights_base);
@@ -787,7 +854,7 @@ SimulatedAnnealingReport run_multi_start_simulated_annealing(
     std::ofstream out_file(checkpoint_csv_path);
     if (out_file.is_open()) {
         out_file << "chain_id,iteration,temperature,j_total,j_arrival_norm,j_front_norm,j_persistence_norm,j_config_a,j_config_b";
-        for (int i = 0; i < n_params; ++i) out_file << "," << CALIBRATION_PARAMS[i].name;
+        for (int i = 0; i < n_params; ++i) out_file << "," << defs[i].name;
         out_file << ",k_eff_seed\n";
         out_file << std::setprecision(7);
         for (const auto& mem : report.compatible_ensemble) {
@@ -799,7 +866,15 @@ SimulatedAnnealingReport run_multi_start_simulated_annealing(
             float k_eff = 0.0f;
             if (seed_cell != nullptr) {
                 abm::CarryingCapacityParams cc = cc_base;
-                cc.k0 = mem.theta[3]; cc.gamma1_imp = mem.theta[6]; cc.gamma2_borde = mem.theta[7]; cc.gamma3_dosel = mem.theta[8];
+                cc.k0 = mem.theta[static_cast<size_t>(ctx.i_k0)];
+                if (model == abm::CarryingModel::M3) {
+                    cc.gamma1_imp = mem.theta[static_cast<size_t>(ctx.i_g1)];
+                    cc.gamma2_borde = mem.theta[static_cast<size_t>(ctx.i_g2)];
+                    cc.gamma3_dosel = mem.theta[static_cast<size_t>(ctx.i_g3)];
+                } else {
+                    cc.use_hab_index = true;
+                    cc.gamma_hab = (model == abm::CarryingModel::M0) ? 0.0f : mem.theta[static_cast<size_t>(ctx.i_gamma_hab)];
+                }
                 k_eff = abm::compute_carrying_capacity(*seed_cell, cc);
             }
             out_file << "," << k_eff << "\n";

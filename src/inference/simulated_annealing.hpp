@@ -20,10 +20,20 @@ struct CalibrationParamDef {
     float default_val;
 };
 
+/// Conjunto de parámetros calibrables según el modelo de capacidad de carga (Sección 8.4):
+///   M1 (principal, 9 libres): T_c, alpha_s, beta_s, K0, gamma_hab, q_balloon, q_viab, a0, b0
+///   M0 (K_i = K0, 8 libres) : igual que M1 sin gamma_hab
+///   M3 (completo, 11 libres): M0 + gamma_1, gamma_2, gamma_3 (sobreparametrizado en 2014-2019)
+[[nodiscard]] const std::vector<CalibrationParamDef>& calibration_params_for(abm::CarryingModel model);
+
+/// Alias del conjunto del modelo principal M1 (9 parámetros libres)
 extern const std::vector<CalibrationParamDef> CALIBRATION_PARAMS;
 
-/// Índice de beta_s dentro del vector theta (variable DISCRETA en {1, 2, 3})
+/// Índice de beta_s dentro del vector theta (variable DISCRETA en {1, 2, 3}); es el mismo en M0/M1/M3
 constexpr int kBetaDamageIndex = 2;
+
+/// Índice de un parámetro por nombre (-1 si el modelo no lo incluye)
+[[nodiscard]] int calibration_param_index(const std::vector<CalibrationParamDef>& defs, const std::string& name);
 
 /// Telemetría de un tramo de cómputo (una cadena o el total de la calibración)
 struct ChainTelemetry {
@@ -92,6 +102,9 @@ struct SimulatedAnnealingReport {
     int iter_per_chain = 400;
     int total_evaluations = 2000;
     double total_runtime_s = 0.0;
+    abm::CarryingModel model = abm::CarryingModel::M1;   ///< Modelo de K_i evaluado
+    std::vector<CalibrationParamDef> params;             ///< Definición de theta para este modelo
+    size_t atmosphere_slots = 0;                          ///< Campos ERA5 anuales residentes (2014..2019 ⇒ 6)
     double global_min_cost = 1e6;
     std::vector<float> map_theta;
     CostComponents map_components;
@@ -151,6 +164,7 @@ SimulatedAnnealingReport run_multi_start_simulated_annealing(
     int iter_per_chain = 400,
     double initial_temp = 1.0,
     double delta_threshold = 0.05,
-    const std::string& checkpoint_csv_path = "/mnt/hpc_scratch/joro-hpc/checkpoints/theta_compatible_ensemble.csv");
+    const std::string& checkpoint_csv_path = "/mnt/hpc_scratch/joro-hpc/checkpoints/theta_compatible_ensemble.csv",
+    abm::CarryingModel model = abm::CarryingModel::M1);
 
 } // namespace joro::inference

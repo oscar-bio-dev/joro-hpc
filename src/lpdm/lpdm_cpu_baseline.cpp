@@ -25,13 +25,33 @@ namespace joro::lpdm {
 class LpdmCpuBaseline : public LpdmEngine {
 public:
     bool set_atmosphere(const io::AtmosphericField3D& atmosphere) override {
+        clear_atmospheres();
+        return add_atmosphere(atmosphere);
+    }
+
+    void clear_atmospheres() override {
+        eras_.clear();
+        active_ = 0;
+        atmosphere_resident_ = false;
+    }
+
+    bool add_atmosphere(const io::AtmosphericField3D& atmosphere) override {
         Era5Pack pack;
         if (!pack.build(atmosphere)) return false;
-        era5_ = std::move(pack);
-        era5_.refresh_view();
+        eras_.push_back(std::move(pack));
+        eras_.back().refresh_view();
+        active_ = eras_.size() - 1;
         atmosphere_resident_ = true;
         return true;
     }
+
+    bool select_atmosphere(size_t idx) override {
+        if (idx >= eras_.size()) return false;
+        active_ = idx;
+        return true;
+    }
+
+    [[nodiscard]] size_t atmosphere_count() const noexcept override { return eras_.size(); }
 
     [[nodiscard]] bool is_atmosphere_resident() const noexcept override { return atmosphere_resident_; }
 
@@ -98,7 +118,7 @@ public:
 
         // Velocidad de sedimentación biológica exacta para Trichonephila clavata (~0.295 m/s)
         const float vs_aero = compute_settling_velocity(0.6f, 1.2f, 0.85f);
-        const Era5View atm = atmosphere_resident_ ? era5_.view : Era5View{};
+        const Era5View atm = (atmosphere_resident_ && !eras_.empty()) ? eras_[active_].view : Era5View{};
 
         auto k_start = std::chrono::high_resolution_clock::now();
         #pragma omp parallel
@@ -259,7 +279,8 @@ private:
     std::vector<GridCell> cells_;
     std::vector<Particle3D> particles_;
     SpatialGridLookup spatial_lookup_;
-    Era5Pack era5_;
+    std::vector<Era5Pack> eras_;
+    size_t active_ = 0;
     bool atmosphere_resident_ = false;
 };
 

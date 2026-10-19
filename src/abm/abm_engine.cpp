@@ -87,15 +87,21 @@ CellIndexTable CellIndexTable::build(const std::vector<GridCell>& cells) {
     return table;
 }
 
+namespace {
+CarryingCapacityParams make_carrying_params(const DemographicParameters& p) {
+    CarryingCapacityParams cc{p.k0, p.gamma1_imp, p.gamma2_borde, p.gamma3_dosel, p.k_min, p.k_max};
+    cc.gamma_hab = p.gamma_hab;
+    cc.use_hab_index = p.use_hab_index;
+    return cc;
+}
+} // namespace
+
 AbmEngine::AbmEngine(DemographicParameters params)
     : params_(params) {}
 
 void AbmEngine::initialize_seed(const std::vector<GridCell>& cells, float rho0) {
     cohorts_.clear();
-    CarryingCapacityParams cc{
-        params_.k0, params_.gamma1_imp, params_.gamma2_borde, params_.gamma3_dosel,
-        params_.k_min, params_.k_max
-    };
+    CarryingCapacityParams cc = make_carrying_params(params_);
 
     for (const auto& cell : cells) {
         if (cell.is_seed) {
@@ -247,10 +253,7 @@ DemographyYearSummary AbmEngine::step_summer_autumn_phenology(
         index = &local_index;
     }
 
-    CarryingCapacityParams cc{
-        params_.k0, params_.gamma1_imp, params_.gamma2_borde, params_.gamma3_dosel,
-        params_.k_min, params_.k_max
-    };
+    CarryingCapacityParams cc = make_carrying_params(params_);
 
     const size_t n_cohorts = cohorts_.size();
     const float ln_q10 = std::log(params_.q10);
@@ -412,10 +415,7 @@ DemographyYearSummary AbmEngine::step_annual_cycle(
         cell_idx_map[cells[i].cell_id] = i;
     }
 
-    CarryingCapacityParams cc{
-        params_.k0, params_.gamma1_imp, params_.gamma2_borde, params_.gamma3_dosel,
-        params_.k_min, params_.k_max
-    };
+    CarryingCapacityParams cc = make_carrying_params(params_);
 
     const size_t n_cohorts = cohorts_.size();
 

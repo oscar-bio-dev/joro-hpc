@@ -320,11 +320,11 @@ def ingest_observations(
     logger.info("  Filas totales: %d | Celdas ocupadas con Joro: %d | Celdas distintas evaluadas: %d",
                 cal_total, cal_detected, cal_cells)
 
-    cur.execute("SELECT count(*), sum(y_joro_detected), count(DISTINCT cell_id) FROM v_evaluation_set;")
-    eval_total, eval_detected, eval_cells = cur.fetchone()
-    logger.info("=== Vista v_evaluation_set (2020-2024, BLOQUEADA PARA FASE 5) ===")
-    logger.info("  Filas totales: %d | Celdas ocupadas con Joro: %d | Celdas distintas evaluadas: %d",
-                eval_total, eval_detected, eval_cells)
+    # Fase 4.5: v_evaluation_set (2020-2024) NO se consulta aquí (ni siquiera agregados de presencias):
+    # permanece bloqueada hasta la Fase 5. Solo se verifica que la vista exista en el catálogo.
+    cur.execute("SELECT to_regclass('public.v_evaluation_set') IS NOT NULL;")
+    logger.info("=== Vista v_evaluation_set (2020-2024): existe=%s, BLOQUEADA PARA FASE 5 (sin lecturas) ===",
+                cur.fetchone()[0])
 
     cur.close()
     conn.close()

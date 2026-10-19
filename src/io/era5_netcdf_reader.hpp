@@ -95,14 +95,27 @@ struct DailyThermalGrid {
 
 class Era5NetCdfReader {
 public:
+    /// Último año que el simulador puede cargar en memoria durante las Fases 1-4.5. Los archivos 2020-2024
+    /// quedan en disco exclusivamente para la Fase 5 (se desbloquean con JORO_UNLOCK_PHASE5=1).
+    static constexpr int kLastCalibrationYear = 2019;
+
     explicit Era5NetCdfReader(std::string data_dir);
     ~Era5NetCdfReader();
+
+    /// Modo estricto: sin datos sintéticos de respaldo; si falta un archivo o una variable, la carga FALLA.
+    void set_strict(bool strict) noexcept { strict_ = strict; }
+    [[nodiscard]] bool strict() const noexcept { return strict_; }
 
     /// Carga un mes de datos horarios en un tensor 3D continuo
     bool load_month(int year, int month, AtmosphericField3D& field);
 
     /// Carga la serie térmica diaria completa de 365 días para un año dado
     bool load_daily_thermal_year(int year, DailyThermalGrid& grid);
+
+    /// Archivos NetCDF efectivamente abiertos (auditoría de aislamiento de la ventana 2020-2024)
+    [[nodiscard]] const std::vector<std::string>& files_read() const noexcept { return files_read_; }
+    /// Solicitudes rechazadas por la regla de aislamiento (año > kLastCalibrationYear)
+    [[nodiscard]] const std::vector<int>& blocked_year_requests() const noexcept { return blocked_years_; }
 
     /// Convierte velocidad vertical de presión omega [Pa/s] a velocidad física w [m/s]
     static float omega_to_w(float omega, float pressure_pa, float temp_k);
@@ -113,7 +126,12 @@ public:
                              float& u_out, float& v_out, float& w_out) const;
 
 private:
+    [[nodiscard]] bool year_allowed(int year);
+
     std::string data_dir_;
+    bool strict_ = false;
+    std::vector<std::string> files_read_;
+    std::vector<int> blocked_years_;
 };
 
 } // namespace joro::io

@@ -28,8 +28,12 @@
 #include <cstdlib>
 #include <string>
 #include <vector>
+#include <unordered_map>
 #include <numeric>
 #include <cmath>
+#include <fstream>
+#include <filesystem>
+#include <algorithm>
 
 struct YearExecutionMetrics {
     int year = 0;
@@ -301,6 +305,74 @@ void execute_latitudinal_transect_experiment(
     std::cout << "└─────────┴──────────────────────────────┴──────────────┴──────────────┴──────────────┴──────────────┴─────────────────────┘\n";
 }
 
+/// Resumen JSON de una calibración (insumo de scripts/python/build_phase4_report.py)
+static void write_calibration_summary_json(const std::string& path,
+                                           const joro::inference::SimulatedAnnealingReport& r,
+                                           bool era5_strict, const std::string& era5_dir,
+                                           const std::vector<std::string>& era5_files_read,
+                                           const std::vector<int>& blocked_years) {
+    std::ofstream f(path);
+    if (!f.is_open()) return;
+    f << std::setprecision(8);
+    auto vec = [&](const std::vector<float>& v) {
+        f << "[";
+        for (size_t i = 0; i < v.size(); ++i) f << (i ? "," : "") << v[i];
+        f << "]";
+    };
+    f << "{\n  \"model\": \"" << joro::abm::carrying_model_name(r.model) << "\",\n";
+    f << "  \"era5_strict\": " << (era5_strict ? "true" : "false") << ",\n  \"era5_dir\": \"" << era5_dir << "\",\n";
+    f << "  \"n_params\": " << r.params.size() << ",\n  \"params\": [";
+    for (size_t i = 0; i < r.params.size(); ++i)
+        f << (i ? "," : "") << "{\"name\":\"" << r.params[i].name << "\",\"min\":" << r.params[i].min_val
+          << ",\"max\":" << r.params[i].max_val << "}";
+    f << "],\n  \"total_evaluations\": " << r.total_evaluations << ",\n  \"runtime_s\": " << r.total_runtime_s
+      << ",\n  \"global_min_cost\": " << r.global_min_cost << ",\n  \"atmosphere_slots\": " << r.atmosphere_slots
+      << ",\n  \"omp_threads\": " << r.omp_max_threads << ",\n  \"device\": \"" << r.device_description << "\",\n";
+    f << "  \"map_theta\": "; vec(r.map_theta); f << ",\n  \"median_theta\": "; vec(r.median_theta);
+    f << ",\n  \"p5_theta\": "; vec(r.p5_theta); f << ",\n  \"p95_theta\": "; vec(r.p95_theta);
+    f << ",\n  \"map_components\": {\"j_total\":" << r.map_components.j_total
+      << ",\"j_arrival_norm\":" << r.map_components.j_arrival_norm
+      << ",\"j_front_norm\":" << r.map_components.j_front_norm
+      << ",\"j_persistence_norm\":" << r.map_components.j_persistence_norm << "}";
+    f << ",\n  \"nominal_components\": {\"j_arrival_raw\":" << r.nominal_components.j_arrival_raw
+      << ",\"j_front_raw\":" << r.nominal_components.j_front_raw
+      << ",\"j_persistence_raw\":" << r.nominal_components.j_persistence_raw << "}";
+    f << ",\n  \"compatible_members\": " << r.compatible_ensemble.size();
+    f << ",\n  \"retention_a\": " << r.retention_rate_config_a << ",\n  \"retention_b\": " << r.retention_rate_config_b;
+    const auto& t = r.telemetry_total;
+    f << ",\n  \"telemetry\": {\"abm_s\":" << t.abm_time_s << ",\"init_s\":" << t.lpdm_init_time_s
+      << ",\"h2d_s\":" << t.lpdm_h2d_time_s << ",\"kernel_s\":" << t.lpdm_kernel_time_s
+      << ",\"d2h_s\":" << t.lpdm_d2h_time_s << ",\"reduce_s\":" << t.lpdm_reduce_time_s
+      << ",\"cost_s\":" << t.cost_time_s << ",\"particles\":" << t.particles_dispatched
+      << ",\"cpu_fallbacks\":" << t.cpu_fallbacks << ",\"capped\":" << t.capped_dispatches
+      << ",\"evaluations\":" << t.evaluations << "}";
+    const auto& st = r.stratification;
+    f << ",\n  \"stratification\": {\"n_rows\":" << st.n_rows << ",\"arrival_pos\":" << st.arrival_pos
+      << ",\"arrival_neg\":" << st.arrival_neg << ",\"persistence_pos\":" << st.persistence_pos
+      << ",\"persistence_neg\":" << st.persistence_neg << ",\"outside_envelope\":" << st.outside_envelope
+      << ",\"effort_synthetic\":" << (st.effort_synthetic ? "true" : "false")
+      << ",\"effort_imputed_rows\":" << st.effort_imputed_rows << "}";
+    f << ",\n  \"chains\": [";
+    for (size_t i = 0; i < r.chains.size(); ++i) {
+        const auto& c = r.chains[i];
+        f << (i ? ",\n    " : "\n    ") << "{\"id\":" << c.chain_id << ",\"seed\":" << c.seed
+          << ",\"j0\":" << c.initial_cost << ",\"jmin\":" << c.min_cost
+          << ",\"j0_arrival\":" << c.initial_components.j_arrival_norm
+          << ",\"j0_front\":" << c.initial_components.j_front_norm
+          << ",\"j0_persistence\":" << c.initial_components.j_persistence_norm
+          << ",\"best_arrival\":" << c.best_components.j_arrival_norm
+          << ",\"best_front\":" << c.best_components.j_front_norm
+          << ",\"best_persistence\":" << c.best_components.j_persistence_norm
+          << ",\"accepted\":" << c.accepted_proposals << ",\"iters\":" << c.total_iterations
+          << ",\"time_s\":" << c.execution_time_s << ",\"best_theta\":"; vec(c.best_theta); f << "}";
+    }
+    f << "\n  ],\n  \"era5_files_read\": [";
+    for (size_t i = 0; i < era5_files_read.size(); ++i) f << (i ? "," : "") << "\"" << era5_files_read[i] << "\"";
+    f << "],\n  \"era5_blocked_year_requests\": [";
+    for (size_t i = 0; i < blocked_years.size(); ++i) f << (i ? "," : "") << blocked_years[i];
+    f << "]\n}\n";
+}
+
 int main(int argc, char* argv[]) {
     std::cout << "╔═══════════════════════════════════════════════════════════╗\n"
               << "║  JORO-HPC v0.4.0 — Mechanistic LPDM-ABM Simulator         ║\n"
@@ -313,6 +385,8 @@ int main(int argc, char* argv[]) {
     bool run_phase3_morris = false;
     bool run_phase4_calibration = true;
     bool phase4_only = false; // --phase4: solo calibración (omite los ciclos continentales de humo de Fase 1/2)
+    // Modelos de capacidad de carga (Sección 8.4): --model M1 (principal) | M0 | M3 | all (M1 + M0 + M3)
+    std::vector<joro::abm::CarryingModel> models = {joro::abm::CarryingModel::M1};
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -327,12 +401,22 @@ int main(int argc, char* argv[]) {
         else if (arg == "--phase3") { run_phase3_transect = true; run_phase3_morris = true; run_phase4_calibration = false; }
         else if (arg == "--phase4") { run_phase3_transect = false; run_phase3_morris = false; run_phase4_calibration = true; phase4_only = true; }
         else if (arg == "--no-calibration") run_phase4_calibration = false;
+        else if (arg == "--model" && i + 1 < argc) {
+            const std::string m = argv[++i];
+            if (m == "M0") models = {joro::abm::CarryingModel::M0};
+            else if (m == "M1") models = {joro::abm::CarryingModel::M1};
+            else if (m == "M3") models = {joro::abm::CarryingModel::M3};
+            else if (m == "all") models = {joro::abm::CarryingModel::M1, joro::abm::CarryingModel::M0, joro::abm::CarryingModel::M3};
+            else { std::cerr << "[Config] --model debe ser M0, M1, M3 o all\n"; return EXIT_FAILURE; }
+        }
     }
 
     std::cout << "[Config] Modo de Ejecución de Motor LPDM: " << target_engine << "\n";
 
     // 1. Cargar configuración maestra
     auto config = joro::SimulationConfig::load_default();
+    // Solo depuración: directorio ERA5 alternativo (p. ej. humo con datos sustitutos). Nunca en la corrida final.
+    if (const char* e = std::getenv("JORO_ERA5_DIR")) config.era5_dir = e;
     std::cout << "[Config] Dominio MVP: [" << config.bbox.lon_min << ", " << config.bbox.lat_min
               << "] a [" << config.bbox.lon_max << ", " << config.bbox.lat_max << "]\n"
               << "[Config] Ventana de Simulación: " << config.calib_start_year << "–" << config.calib_end_year << "\n"
@@ -346,8 +430,19 @@ int main(int argc, char* argv[]) {
     db_client.load_grid(grid_cells);
     std::cout << "[Malla] " << grid_cells.size() << " celdas demográficas cargadas en memoria.\n";
 
+    // Índice compuesto ortogonalizado de hábitat H_hab = std_norm(0.50 Z_borde + 0.30 Z_imp + 0.20 Z_dosel)
+    {
+        const auto [h_mean, h_sd] = joro::abm::compute_habitat_index(grid_cells);
+        std::cout << "[Malla] H_hab estandarizado sobre " << grid_cells.size() << " celdas (combinación cruda: media "
+                  << h_mean << ", sd " << h_sd << ").\n";
+    }
+
     // 3. Inicializar lector de tensores ERA5 (NetCDF4)
     joro::io::Era5NetCdfReader era5_reader(config.era5_dir);
+    // Fase 4.5: la calibración exige ERA5 REAL por año (sin respaldo sintético ni reciclaje de 2014)
+    // (JORO_ERA5_NONSTRICT=1 solo para depurar el flujo; el resumen JSON registra `era5_strict` y el informe lo marca.)
+    const bool era5_strict = phase4_only && std::getenv("JORO_ERA5_NONSTRICT") == nullptr;
+    if (era5_strict) era5_reader.set_strict(true);
     joro::io::AtmosphericField3D atmosphere;
     era5_reader.load_month(2014, 5, atmosphere);
     std::cout << "[ERA5] Tensores atmosféricos 3D cargados: " << atmosphere.n_levels
@@ -443,24 +538,49 @@ int main(int argc, char* argv[]) {
         }
         std::cout << "[ERA5] Series térmicas diarias 2014–2019 cargadas (una grilla por año).\n";
 
-        // Tensores ERA5 3D (u, v, w, BLH, sp) -> Device USM UNA sola vez; el kernel SYCL interpola el viento real.
-        if (!lpdm_gpu->set_atmosphere(atmosphere)) {
-            std::cerr << "[Fase 4] Error: el campo ERA5 no es utilizable para el transporte LPDM.\n";
-            return EXIT_FAILURE;
+        // Tensores ERA5 3D (u, v, w, BLH, sp) de CADA año 2014..2019 -> Device USM UNA sola vez (6 campos
+        // residentes); cada año simulado usa SU meteorología real (sin reciclar 1-7 mayo de 2014).
+        lpdm_gpu->clear_atmospheres();
+        for (int yi = 0; yi < 6; ++yi) {
+            joro::io::AtmosphericField3D field_y;
+            if (!era5_reader.load_month(2014 + yi, 5, field_y) || !lpdm_gpu->add_atmosphere(field_y)) {
+                std::cerr << "[Fase 4] Error: ERA5 3D/superficial de " << (2014 + yi) << " no utilizable para el LPDM.\n";
+                return EXIT_FAILURE;
+            }
         }
+        std::cout << "[ERA5] " << lpdm_gpu->atmosphere_count() << " campos 3D+superficiales anuales (2014–2019) residentes en el dispositivo.\n";
 
         // Las 5 cadenas se ejecutan secuencialmente; cada evaluación usa la GPU (LPDM) y todos los hilos OpenMP.
+        // Se calibra cada modelo candidato de K_i solicitado; el primero (M1 por defecto) es el principal.
+        for (size_t model_pos = 0; model_pos < models.size(); ++model_pos) {
+        const joro::abm::CarryingModel cal_model = models[model_pos];
+        const bool main_model = (model_pos == 0);
         joro::inference::SimulatedAnnealingReport sa_report;
         int sa_chains = 5, sa_iters = 400; // Configuración oficial: 5 x 400 = 2,000 evaluaciones
         if (const char* e = std::getenv("JORO_SA_CHAINS")) sa_chains = std::max(1, std::atoi(e));
         if (const char* e = std::getenv("JORO_SA_ITERS")) sa_iters = std::max(10, std::atoi(e));
         try {
+            const std::string ckpt_dir = "/mnt/hpc_scratch/joro-hpc/checkpoints/";
+            const std::string ckpt = main_model && cal_model == joro::abm::CarryingModel::M1
+                ? ckpt_dir + "theta_compatible_ensemble.csv"
+                : ckpt_dir + "theta_compatible_ensemble_" + joro::abm::carrying_model_name(cal_model) + ".csv";
             sa_report = joro::inference::run_multi_start_simulated_annealing(
                 grid_cells, thermal_by_year, observations, lpdm_gpu.get(), sa_chains, sa_iters, 1.0, 0.05,
-                "/mnt/hpc_scratch/joro-hpc/checkpoints/theta_compatible_ensemble.csv");
+                ckpt, cal_model);
         } catch (const std::exception& e) {
             std::cerr << "[Fase 4] ERROR: " << e.what() << "\n";
             return EXIT_FAILURE;
+        }
+
+        write_calibration_summary_json(
+            std::string("/mnt/hpc_scratch/joro-hpc/checkpoints/phase4_summary_") +
+                joro::abm::carrying_model_name(cal_model) + ".json",
+            sa_report, era5_strict, config.era5_dir, era5_reader.files_read(), era5_reader.blocked_year_requests());
+        if (!main_model) {
+            std::cout << "[Modelo " << joro::abm::carrying_model_name(cal_model) << "] J_min = " << std::fixed
+                      << std::setprecision(4) << sa_report.global_min_cost << " en " << std::setprecision(2)
+                      << sa_report.total_runtime_s << " s (" << sa_report.params.size() << " parámetros libres)\n";
+            continue;
         }
 
         // ─────────────────────────────────────────────────────────────────────
@@ -495,20 +615,22 @@ int main(int argc, char* argv[]) {
         std::cout << "│ Parámetro    │ Símbolo │ Rango Prior [Min,Max]│ Optimo theta^│ Mediana Comp │ Intervalo P5–P95        │ Interpretación Biológica / Física        │\n";
         std::cout << "├──────────────┼─────────┼──────────────────────┼──────────────┼──────────────┼─────────────────────────┼──────────────────────────────────────────┤\n";
 
-        std::vector<std::string> descriptions = {
-            "Umbral térmico crítico de letalidad invernal",
-            "Tasa de acumulación de estrés térmico diario",
-            "Exponente DISCRETO de daño por frío {1,2,3}",
-            "Capacidad de carga basal en hábitat promedio",
-            "Fracción de juveniles que inician baloneo aéreo",
-            "Viabilidad media de ootecas tras oviposición",
-            "Efecto de impermeabilidad urbana sobre K_i",
-            "Efecto de borde de bosque/vegetación en K_i",
-            "Efecto de dosel arbóreo (microclima térmico)"
-        };
+        const std::unordered_map<std::string, std::string> descriptions = {
+            {"t_c",          "Umbral térmico crítico de letalidad invernal"},
+            {"alpha_damage", "Tasa de acumulación de estrés térmico diario"},
+            {"beta_damage",  "Exponente DISCRETO de daño por frío {1,2,3}"},
+            {"k0",           "Capacidad de carga basal (mediana de K_i)"},
+            {"gamma_hab",    "Pendiente global de selección de hábitat H_hab"},
+            {"q_balloon",    "Fracción de juveniles que inician baloneo aéreo"},
+            {"q_viab",       "Viabilidad media de ootecas tras oviposición"},
+            {"a0",           "Intercepto de colonización logit(gamma)"},
+            {"b0",           "Intercepto/umbral de persistencia logit(phi)"},
+            {"gamma1_imp",   "Efecto de impermeabilidad urbana sobre K_i"},
+            {"gamma2_borde", "Efecto de borde de bosque/vegetación en K_i"},
+            {"gamma3_dosel", "Efecto de dosel arbóreo (microclima térmico)"}};
 
-        for (size_t i = 0; i < joro::inference::CALIBRATION_PARAMS.size(); ++i) {
-            const auto& def = joro::inference::CALIBRATION_PARAMS[i];
+        for (size_t i = 0; i < sa_report.params.size(); ++i) {
+            const auto& def = sa_report.params[i];
             const bool is_beta = (static_cast<int>(i) == joro::inference::kBetaDamageIndex);
             std::stringstream ss_prior, ss_ci;
             if (is_beta) {
@@ -526,7 +648,7 @@ int main(int argc, char* argv[]) {
                       << std::setw(12) << std::fixed << std::setprecision(prec) << sa_report.map_theta[i] << " │ "
                       << std::setw(12) << std::fixed << std::setprecision(prec) << sa_report.median_theta[i] << " │ "
                       << std::setw(23) << ss_ci.str() << " │ "
-                      << std::left << std::setw(40) << descriptions[i] << std::right << " │\n";
+                      << std::left << std::setw(40) << descriptions.at(def.name) << std::right << " │\n";
         }
         std::cout << "└──────────────┴─────────┴──────────────────────┴──────────────┴──────────────┴─────────────────────────┴──────────────────────────────────────────┘\n";
         std::cout << "  ✔ Miembros en conjunto compatible Theta_comp (Delta <= 0.05, sobre todas las evaluaciones): " 
@@ -602,6 +724,7 @@ int main(int argc, char* argv[]) {
             std::cout << "  ✔ Balance entre cadenas: min " << std::setprecision(2) << tmin << " s | media " << tmean << " s | max " << tmax
                       << " s | max/min = " << (tmin > 0.0 ? tmax / tmin : 0.0) << "\n";
         }
+        } // fin del bucle de modelos K_i
     }
 
     std::cout << "\n✔ Fase 4 completada exitosamente.\n";
