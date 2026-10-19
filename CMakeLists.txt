@@ -144,6 +144,9 @@ endif()
 add_executable(joro_hpc src/main.cpp)
 target_link_libraries(joro_hpc PRIVATE joro_core)
 
+add_executable(phase5_runner src/phase5_main.cpp)
+target_link_libraries(phase5_runner PRIVATE joro_core)
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 6. Suite de Pruebas Numéricas (tests/)
 # ─────────────────────────────────────────────────────────────────────────────

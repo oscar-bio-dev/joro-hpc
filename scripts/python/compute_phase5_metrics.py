@@ -1,0 +1,307 @@
+#!/usr/bin/env python3
+"""
+JORO-HPC · scripts/python/compute_phase5_metrics.py
+Calcula exhaustivamente todas las métricas oficiales de la Fase 5 para:
+  - JORO-HPC M1 (MAP y Ensamble)
+  - JORO-HPC M0 (K0 constante)
+  - Kernel Exponencial Isotrópico (Null H2)
+  - SDM Correlativo Estático (Null H1)
+
+Genera el archivo maestro de métricas JSON y los datos para el informe final.
+"""
+import json
+import numpy as np
+import pandas as pd
+from sklearn.metrics import roc_auc_score, average_precision_score, brier_score_loss, log_loss
+from sklearn.linear_model import LinearRegression
+
+PRED_CSV = "/mnt/hpc_scratch/joro-hpc/outputs/predictions_2020_2024_ensemble.csv"
+OUT_JSON = "/mnt/hpc_scratch/joro-hpc/outputs/phase5_validation_metrics.json"
+
+EPI_LAT = 34.13816
+EPI_LON = -83.75723
+
+def dist_km(lat, lon):
+    dlat = (lat - EPI_LAT) * 111.0
+    dlon = (lon - EPI_LON) * 111.0 * np.cos(np.radians(EPI_LAT))
+    return np.sqrt(dlat**2 + dlon**2)
+
+def azimuth_deg(lat, lon):
+    dlat = (lat - EPI_LAT) * 111.0
+    dlon = (lon - EPI_LON) * 111.0 * np.cos(np.radians(EPI_LAT))
+    deg = np.degrees(np.arctan2(dlon, dlat)) % 360.0
+    return deg
+
+def circular_mean(angles_deg, weights=None):
+    rads = np.radians(angles_deg)
+    if weights is None:
+        s = np.sin(rads).mean()
+        c = np.cos(rads).mean()
+    else:
+        w_sum = np.sum(weights)
+        if w_sum <= 0: return 0.0
+        s = np.sum(weights * np.sin(rads)) / w_sum
+        c = np.sum(weights * np.cos(rads)) / w_sum
+    res = np.degrees(np.arctan2(s, c)) % 360.0
+    return res
+
+def angular_diff(a1, a2):
+    diff = abs(a1 - a2) % 360.0
+    return diff if diff <= 180.0 else 360.0 - diff
+
+def get_calibration_slope_intercept(p, y):
+    eps = 1e-6
+    p_c = np.clip(p, eps, 1.0 - eps)
+    logit_p = np.log(p_c / (1.0 - p_c)).reshape(-1, 1)
+    lr = LinearRegression()
+    lr.fit(logit_p, y)
+    return float(lr.coef_[0]), float(lr.intercept_)
+
+def calc_balanced_brier(p, y, dists, radius=350.0):
+    pos_mask = (y == 1)
+    neg_mask = (y == 0) & (dists <= radius)
+    if pos_mask.sum() == 0 or neg_mask.sum() == 0:
+        return float(brier_score_loss(y, p))
+    b_pos = np.mean((1.0 - p[pos_mask]) ** 2)
+    b_neg = np.mean((p[neg_mask]) ** 2)
+    return float(0.5 * (b_pos + b_neg))
+
+def main():
+    print("▶ Cargando predicciones de ensamble de Fase 5...")
+    df = pd.read_csv(PRED_CSV)
+    print(f"✔ Cargadas {len(df)} filas celda-año (2020–2024).")
+
+    df["dist"] = dist_km(df["centroid_lat"].values, df["centroid_lon"].values)
+    df["angle"] = azimuth_deg(df["centroid_lat"].values, df["centroid_lon"].values)
+
+    models = {
+        "m1_map": "p_m1_map",
+        "m1_median": "p_m1_median",
+        "m0_map": "p_m0_map",
+        "iso_null": "p_iso_null",
+        "sdm": "p_sdm"
+    }
+
+    results = {
+        "global": {},
+        "by_year": {},
+        "kinematics": {},
+        "thermal_persistence": {},
+        "ecoregions": {},
+        "uncertainty": {}
+    }
+
+    y_all = df["y_observed"].values
+    dists_all = df["dist"].values
+
+    print("\n--- 1. DESEMPEÑO PROBABILÍSTICO GLOBAL (2020-2024) ---")
+    for m_key, col in models.items():
+        p_vals = df[col].values
+        bg = float(brier_score_loss(y_all, p_vals))
+        bb = calc_balanced_brier(p_vals, y_all, dists_all, 350.0)
+        ll = float(log_loss(y_all, np.clip(p_vals, 1e-15, 1 - 1e-15)))
+        auc = float(roc_auc_score(y_all, p_vals))
+        prauc = float(average_precision_score(y_all, p_vals))
+        slope, intercept = get_calibration_slope_intercept(p_vals, y_all)
+
+        results["global"][m_key] = {
+            "brier_global": bg,
+            "brier_balanced": bb,
+            "log_loss": ll,
+            "auc_roc": auc,
+            "pr_auc": prauc,
+            "calib_slope": slope,
+            "calib_intercept": intercept
+        }
+        print(f"[{m_key:10s}] Brier: {bg:.5f} (Bal: {bb:.5f}) | LogLoss: {ll:.4f} | AUC: {auc:.4f} | PR-AUC: {prauc:.4f} | Slope: {slope:.3f}")
+
+    print("\n--- 2. DESGLOSE ANUAL FUERA DE MUESTRA (2020-2024) ---")
+    for yr in range(2020, 2025):
+        sub = df[df["year"] == yr]
+        y_yr = sub["y_observed"].values
+        dists_yr = sub["dist"].values
+        yr_res = {"presences": int(y_yr.sum())}
+
+        for m_key, col in models.items():
+            p_vals = sub[col].values
+            bg = float(brier_score_loss(y_yr, p_vals))
+            bb = calc_balanced_brier(p_vals, y_yr, dists_yr, 350.0)
+            ll = float(log_loss(y_yr, np.clip(p_vals, 1e-15, 1 - 1e-15)))
+            auc = float(roc_auc_score(y_yr, p_vals))
+            prauc = float(average_precision_score(y_yr, p_vals))
+            yr_res[m_key] = {"brier": bg, "brier_bal": bb, "log_loss": ll, "auc": auc, "pr_auc": prauc}
+
+        results["by_year"][yr] = yr_res
+        print(f"Año {yr} (N_pos={yr_res['presences']:3d}) | Brier M1: {yr_res['m1_map']['brier']:.5f}, Kern: {yr_res['iso_null']['brier']:.5f}, SDM: {yr_res['sdm']['brier']:.5f} | AUC M1: {yr_res['m1_map']['auc']:.4f}, Kern: {yr_res['iso_null']['auc']:.4f}, SDM: {yr_res['sdm']['auc']:.4f}")
+
+    print("\n--- 3. CINEMÁTICA Y GEOMETRÍA DEL FRENTE DE INVASIÓN (H2) ---")
+    kin = {}
+    for yr in range(2020, 2025):
+        sub = df[df["year"] == yr]
+        obs = sub[sub["y_observed"] == 1]
+        obs_dists = obs["dist"].values
+        obs_angles = obs["angle"].values
+
+        o_p50 = float(np.percentile(obs_dists, 50))
+        o_p90 = float(np.percentile(obs_dists, 90))
+        o_p95 = float(np.percentile(obs_dists, 95))
+        o_ang = float(circular_mean(obs_angles))
+
+        yr_kin = {
+            "obs_p50": o_p50, "obs_p90": o_p90, "obs_p95": o_p95, "obs_angle": o_ang
+        }
+
+        for m_key, col in [("m1_map", "p_m1_map"), ("m0_map", "p_m0_map"), ("iso_null", "p_iso_null")]:
+            # Celdas con presencia predicha relevante (p >= 0.05 o top percentil)
+            thresh = 0.05 if m_key != "iso_null" else 0.02
+            pred_cells = sub[sub[col] >= thresh]
+            if len(pred_cells) < 5:
+                pred_cells = sub.nlargest(100, col)
+            p_dists = pred_cells["dist"].values
+            p_angles = pred_cells["angle"].values
+            w = pred_cells[col].values
+
+            m_p50 = float(np.percentile(p_dists, 50))
+            m_p90 = float(np.percentile(p_dists, 90))
+            m_p95 = float(np.percentile(p_dists, 95))
+            m_ang = float(circular_mean(p_angles, weights=w))
+            rmse_front = float(np.sqrt(np.mean([(m_p50 - o_p50)**2, (m_p90 - o_p90)**2, (m_p95 - o_p95)**2])))
+            ang_err = float(angular_diff(m_ang, o_ang))
+
+            yr_kin[m_key] = {
+                "p50": m_p50, "p90": m_p90, "p95": m_p95,
+                "angle": m_ang, "rmse_front_km": rmse_front, "angular_error_deg": ang_err
+            }
+
+        kin[yr] = yr_kin
+        print(f"Año {yr} | Obs P95: {o_p95:.1f} km, M1 P95: {yr_kin['m1_map']['p95']:.1f} km, Iso P95: {yr_kin['iso_null']['p95']:.1f} km | Error Ang M1: {yr_kin['m1_map']['angular_error_deg']:.1f}°, Iso: {yr_kin['iso_null']['angular_error_deg']:.1f}°")
+
+    results["kinematics"] = kin
+
+    # Error en fecha de primera llegada por celda
+    cells_with_presence = df[df["y_observed"] == 1]["cell_id"].unique()
+    first_obs = df[df["y_observed"] == 1].groupby("cell_id")["year"].min()
+
+    first_errs = {"m1_map": [], "iso_null": [], "sdm": []}
+    for cid in cells_with_presence:
+        t_obs = first_obs[cid]
+        c_rows = df[df["cell_id"] == cid].sort_values("year")
+        for m_key, col in [("m1_map", "p_m1_map"), ("iso_null", "p_iso_null"), ("sdm", "p_sdm")]:
+            thresh = 0.05
+            pred_arrival = c_rows[c_rows[col] >= thresh]
+            t_pred = pred_arrival["year"].min() if len(pred_arrival) > 0 else 2025
+            first_errs[m_key].append(abs(t_pred - t_obs))
+
+    results["first_arrival_mae"] = {
+        k: float(np.mean(v)) for k, v in first_errs.items()
+    }
+    print(f"Error MAE Primera Llegada: M1={results['first_arrival_mae']['m1_map']:.2f} años, Iso={results['first_arrival_mae']['iso_null']:.2f} años, SDM={results['first_arrival_mae']['sdm']:.2f} años")
+
+    print("\n--- 4. PERSISTENCIA TÉRMICA Y TRANSFERENCIA POR ECORREGIONES (H1) ---")
+    north_mask = (df["centroid_lat"] > 40.0)
+    fpr_north = {}
+    for m_key, col in models.items():
+        sub_north = df[north_mask]
+        neg_north = sub_north[sub_north["y_observed"] == 0]
+        fp = (neg_north[col] >= 0.05).sum()
+        fpr = float(fp / len(neg_north)) if len(neg_north) > 0 else 0.0
+        fpr_north[m_key] = fpr
+
+    results["thermal_persistence"]["fpr_north_40"] = fpr_north
+    print(f"Tasa Falsos Positivos Norte >40°N: M1={fpr_north['m1_map']*100:.2f}%, M0={fpr_north['m0_map']*100:.2f}%, Iso={fpr_north['iso_null']*100:.2f}%, SDM={fpr_north['sdm']*100:.2f}%")
+
+    # Persistencia interanual (>= 2 años consecutivos)
+    # Comparar la probabilidad de persistencia condicional a haber estado ocupado el año anterior
+    # en celdas con registros en t-1
+    cells_seen = set()
+    persist_records = {"observed": [], "m1": [], "m0": [], "iso": [], "sdm": []}
+    for yr in range(2020, 2025):
+        sub = df[df["year"] == yr]
+        for _, row in sub.iterrows():
+            cid = row["cell_id"]
+            if cid in cells_seen:
+                persist_records["observed"].append(row["y_observed"])
+                persist_records["m1"].append(row["p_m1_map"])
+                persist_records["m0"].append(row["p_m0_map"])
+                persist_records["iso"].append(row["p_iso_null"])
+                persist_records["sdm"].append(row["p_sdm"])
+            if row["y_observed"] == 1:
+                cells_seen.add(cid)
+
+    if persist_records["observed"]:
+        y_p = np.array(persist_records["observed"])
+        results["thermal_persistence"]["interannual_persistence_brier"] = {
+            "m1": float(brier_score_loss(y_p, persist_records["m1"])),
+            "m0": float(brier_score_loss(y_p, persist_records["m0"])),
+            "iso": float(brier_score_loss(y_p, persist_records["iso"])),
+            "sdm": float(brier_score_loss(y_p, persist_records["sdm"])),
+            "n_evaluations": len(y_p)
+        }
+        print(f"Brier Persistencia Interanual (N={len(y_p)}): M1={results['thermal_persistence']['interannual_persistence_brier']['m1']:.4f}, M0={results['thermal_persistence']['interannual_persistence_brier']['m0']:.4f}, Iso={results['thermal_persistence']['interannual_persistence_brier']['iso']:.4f}, SDM={results['thermal_persistence']['interannual_persistence_brier']['sdm']:.4f}")
+
+    # Desempeño por bloques ecorregionales (Bloque 5 visto vs Bloques no vistos)
+    eco_res = {}
+    for block_id in sorted(df["ecoregion_block"].unique()):
+        sub_b = df[df["ecoregion_block"] == block_id]
+        y_b = sub_b["y_observed"].values
+        pres_b = int(y_b.sum())
+        b_dict = {"n_rows": len(sub_b), "presences": pres_b}
+        if pres_b > 0 and len(np.unique(y_b)) > 1:
+            for m_key, col in models.items():
+                p_b = sub_b[col].values
+                b_dict[m_key] = {
+                    "brier": float(brier_score_loss(y_b, p_b)),
+                    "auc": float(roc_auc_score(y_b, p_b))
+                }
+        else:
+            for m_key, col in models.items():
+                p_b = sub_b[col].values
+                b_dict[m_key] = {
+                    "brier": float(brier_score_loss(y_b, p_b)),
+                    "auc": 0.5
+                }
+        eco_res[int(block_id)] = b_dict
+
+    results["ecoregions"] = eco_res
+    b5 = eco_res.get(5, {})
+    print(f"Bloque 5 (Visto en Calibración): N_pos={b5.get('presences',0)} | Brier M1={b5.get('m1_map',{}).get('brier',0):.5f}, SDM={b5.get('sdm',{}).get('brier',0):.5f} | AUC M1={b5.get('m1_map',{}).get('auc',0):.4f}, SDM={b5.get('sdm',{}).get('auc',0):.4f}")
+
+    # Bloques no vistos
+    unseen_df = df[df["ecoregion_block"] != 5]
+    y_unseen = unseen_df["y_observed"].values
+    print(f"Bloques Nuevos (No vistos, N_pos={y_unseen.sum()}):")
+    for m_key, col in models.items():
+        p_u = unseen_df[col].values
+        b_u = float(brier_score_loss(y_unseen, p_u))
+        auc_u = float(roc_auc_score(y_unseen, p_u)) if y_unseen.sum() > 0 else 0.5
+        print(f"  [{m_key:10s}] Brier: {b_u:.5f} | AUC: {auc_u:.4f}")
+
+    print("\n--- 5. PROPAGACIÓN DE INCERTIDUMBRE (Theta_comp, 277 MIEMBROS) ---")
+    p5 = df["p_m1_p5"].values
+    p95 = df["p_m1_p95"].values
+    med = df["p_m1_median"].values
+
+    # Cobertura sobre agregación de celdas por año
+    yearly_cov = {}
+    for yr in range(2020, 2025):
+        sub = df[df["year"] == yr]
+        obs_sum = int(sub["y_observed"].sum())
+        p5_sum = float(sub["p_m1_p5"].sum())
+        med_sum = float(sub["p_m1_median"].sum())
+        p95_sum = float(sub["p_m1_p95"].sum())
+        in_pi = bool(p5_sum <= obs_sum <= p95_sum)
+        yearly_cov[yr] = {"obs": obs_sum, "p5": p5_sum, "median": med_sum, "p95": p95_sum, "in_90_pi": in_pi}
+        print(f"Año {yr}: Obs={obs_sum:4d} | Intervalo 90% P5-P95: [{p5_sum:6.1f}, {p95_sum:6.1f}] | Cubierto: {in_pi}")
+
+    results["uncertainty"] = {
+        "ensemble_size": 277,
+        "mean_band_width": float(np.mean(p95 - p5)),
+        "yearly_aggregated_coverage": yearly_cov
+    }
+
+    with open(OUT_JSON, "w") as f:
+        json.dump(results, f, indent=2)
+    print(f"\n✔ Métricas maestras guardadas en: {OUT_JSON}")
+
+if __name__ == "__main__":
+    main()
