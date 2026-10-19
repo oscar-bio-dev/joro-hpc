@@ -1,6 +1,6 @@
 # JORO-HPC — Informe final Fase 4.5: cierre de datos interanuales y reparametrización de identificabilidad
 
-_Generado automáticamente el 2026-10-19 02:34 por `scripts/python/build_phase4_report.py` a partir de los artefactos de la corrida. Los veredictos se calculan con reglas fijas._
+_Generado automáticamente el 2026-10-19 08:15 por `scripts/python/build_phase4_report.py` a partir de los artefactos de la corrida. Los veredictos se calculan con reglas fijas._
 
 - Dispositivo LPDM: **Intel(R) Arc(TM) A380 Graphics | Intel(R) oneAPI Unified Runtime over Level-Zero | GPU** (pruebas); la corrida de producción final será en la Arc A770.
 - Hilos OpenMP: **16**. Evaluaciones por modelo: **2000** (5 cadenas × 400).
@@ -17,17 +17,17 @@ _Generado automáticamente el 2026-10-19 02:34 por `scripts/python/build_phase4_
 | 2017 | ✔ 157.3 MB | ✔ 13.2 MB | ✔ 12.2 MB | calibración (leído) |
 | 2018 | ✔ 159.5 MB | ✔ 13.2 MB | ✔ 12.3 MB | calibración (leído) |
 | 2019 | ✔ 160.9 MB | ✔ 13.2 MB | ✔ 12.3 MB | calibración (leído) |
-| 2020 | ✔ 158.5 MB | ✔ 13.2 MB | ✘ falta | reservado Fase 5 (NO leído) |
-| 2021 | ✘ falta | ✘ falta | ✘ falta | reservado Fase 5 (NO leído) |
-| 2022 | ✘ falta | ✘ falta | ✘ falta | reservado Fase 5 (NO leído) |
-| 2023 | ✘ falta | ✘ falta | ✘ falta | reservado Fase 5 (NO leído) |
-| 2024 | ✘ falta | ✘ falta | ✘ falta | reservado Fase 5 (NO leído) |
+| 2020 | ✔ 158.5 MB | ✔ 13.2 MB | ✔ 12.3 MB | reservado Fase 5 (NO leído) |
+| 2021 | ✔ 161.3 MB | ✔ 13.1 MB | ✔ 12.2 MB | reservado Fase 5 (NO leído) |
+| 2022 | ✔ 154.3 MB | ✔ 13.2 MB | ✔ 12.4 MB | reservado Fase 5 (NO leído) |
+| 2023 | ✔ 152.6 MB | ✔ 13.1 MB | ✔ 12.3 MB | reservado Fase 5 (NO leído) |
+| 2024 | ✔ 158.0 MB | ✔ 13.1 MB | ✔ 12.2 MB | reservado Fase 5 (NO leído) |
 
 - Archivos ERA5 efectivamente abiertos por el simulador: **21**; años distintos leídos: **[2014, 2015, 2016, 2017, 2018, 2019]**.
 - Solicitudes bloqueadas por la regla de aislamiento (año > 2019): **[]**.
 - Campos ERA5 3D+superficiales residentes en la GPU (uno por año): **6** (cada año simulado usa SU meteorología; ya no se recicla el 1–7 de mayo de 2014).
 - Modo estricto del lector (sin datos sintéticos de respaldo): **True**; directorio: `/mnt/hpc_scratch/joro-hpc/era5_nc_active`.
-- **Veredicto:** ✘ NO CUMPLE.
+- **Veredicto:** ✔ CUMPLE.
 
 > **Alcance meteorológico (limitación):** los tensores 3D/superficiales cubren la ventana 1–7 de mayo de cada año (la fase de baloneo), y la serie `t2m` diaria cubre los 365 días. Es lo que consume el simulador.
 
@@ -163,7 +163,7 @@ Mayores |ρ|: `k0`–`b0` = -0.93; `k0`–`q_balloon` = -0.82; `beta_damage`–`
 
 | Criterio | Estado |
 |---|---|
-| ERA5 2014–2024 en disco, solo 2014–2019 leído | ✘ |
+| ERA5 2014–2024 en disco, solo 2014–2019 leído | ✔ |
 | Censo real y conteo exacto GBIF en `grid_5km`/`cell_annual_observations` | ✔ |
 | Exactamente 9 parámetros libres en M1 | ✔ |
 | `ctest` 4/4 | ver nota |
