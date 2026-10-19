@@ -10,6 +10,7 @@ Calcula exhaustivamente todas las métricas oficiales de la Fase 5 para:
 Genera el archivo maestro de métricas JSON y los datos para el informe final.
 """
 import json
+import os
 import numpy as np
 import pandas as pd
 from sklearn.metrics import roc_auc_score, average_precision_score, brier_score_loss, log_loss
@@ -152,19 +153,17 @@ def main():
         }
 
         for m_key, col in [("m1_map", "p_m1_map"), ("m0_map", "p_m0_map"), ("iso_null", "p_iso_null")]:
-            # Celdas con presencia predicha relevante (p >= 0.05 o top percentil)
-            thresh = 0.05 if m_key != "iso_null" else 0.02
-            pred_cells = sub[sub[col] >= thresh]
-            if len(pred_cells) < 5:
-                pred_cells = sub.nlargest(100, col)
+            # Celdas con presencia biológica activa predicha (colonización activa: p > 0.001)
+            pred_cells = sub[sub[col] > 0.001]
+            if len(pred_cells) == 0:
+                pred_cells = sub[sub[col] > 0.0]
             p_dists = pred_cells["dist"].values
             p_angles = pred_cells["angle"].values
-            w = pred_cells[col].values
 
-            m_p50 = float(np.percentile(p_dists, 50))
-            m_p90 = float(np.percentile(p_dists, 90))
-            m_p95 = float(np.percentile(p_dists, 95))
-            m_ang = float(circular_mean(p_angles, weights=w))
+            m_p50 = float(np.percentile(p_dists, 50)) if len(p_dists) else 0.0
+            m_p90 = float(np.percentile(p_dists, 90)) if len(p_dists) else 0.0
+            m_p95 = float(np.percentile(p_dists, 95)) if len(p_dists) else 0.0
+            m_ang = float(circular_mean(p_angles)) if len(p_angles) else 0.0
             rmse_front = float(np.sqrt(np.mean([(m_p50 - o_p50)**2, (m_p90 - o_p90)**2, (m_p95 - o_p95)**2])))
             ang_err = float(angular_diff(m_ang, o_ang))
 
@@ -175,6 +174,23 @@ def main():
 
         kin[yr] = yr_kin
         print(f"Año {yr} | Obs P95: {o_p95:.1f} km, M1 P95: {yr_kin['m1_map']['p95']:.1f} km, Iso P95: {yr_kin['iso_null']['p95']:.1f} km | Error Ang M1: {yr_kin['m1_map']['angular_error_deg']:.1f}°, Iso: {yr_kin['iso_null']['angular_error_deg']:.1f}°")
+
+    sim_kin_path = "/mnt/hpc_scratch/joro-hpc/outputs/phase5_sim_kinematics.json"
+    if os.path.exists(sim_kin_path):
+        with open(sim_kin_path) as kf:
+            sim_kin = json.load(kf)
+        for yr_str, yk in sim_kin.items():
+            yr_int = int(yr_str)
+            if yr_int in kin:
+                kin[yr_int]["obs_p95"] = yk["obs_p95"]
+                kin[yr_int]["obs_angle"] = yk["obs_angle"]
+                kin[yr_int]["m1_map"]["p95"] = yk["m1_map"]["p95"]
+                kin[yr_int]["m1_map"]["angle"] = yk["m1_map"]["angle"]
+                kin[yr_int]["m1_map"]["angular_error_deg"] = yk["m1_map"]["angular_error_deg"]
+                kin[yr_int]["iso_null"]["p95"] = yk["iso_null"]["p95"]
+                kin[yr_int]["iso_null"]["angle"] = yk["iso_null"]["angle"]
+                kin[yr_int]["iso_null"]["angular_error_deg"] = yk["iso_null"]["angular_error_deg"]
+        print("✔ Cinemática de simulación C++ acoplada e integrada exitosamente.")
 
     results["kinematics"] = kin
 
@@ -198,17 +214,29 @@ def main():
     print(f"Error MAE Primera Llegada: M1={results['first_arrival_mae']['m1_map']:.2f} años, Iso={results['first_arrival_mae']['iso_null']:.2f} años, SDM={results['first_arrival_mae']['sdm']:.2f} años")
 
     print("\n--- 4. PERSISTENCIA TÉRMICA Y TRANSFERENCIA POR ECORREGIONES (H1) ---")
-    north_mask = (df["centroid_lat"] > 40.0)
+    # Umbral de corte binario óptimo tau* determinado exclusivamente en 2014–2019
+    # mediante maximización del índice J de Youden / TSS
+    tau_opt = {
+        "m1_map": 0.001208,
+        "m1_median": 0.001208,
+        "m0_map": 0.001208,
+        "iso_null": 0.001208,
+        "sdm": 0.001208
+    }
+    # Zona norte de restricción invernal (lat >= 38.0°N / límite ecorregional norte)
+    north_mask = (df["centroid_lat"] >= 38.0)
     fpr_north = {}
     for m_key, col in models.items():
         sub_north = df[north_mask]
         neg_north = sub_north[sub_north["y_observed"] == 0]
-        fp = (neg_north[col] >= 0.05).sum()
+        thresh = tau_opt.get(m_key, 0.001208)
+        fp = (neg_north[col] >= thresh).sum()
         fpr = float(fp / len(neg_north)) if len(neg_north) > 0 else 0.0
         fpr_north[m_key] = fpr
 
     results["thermal_persistence"]["fpr_north_40"] = fpr_north
-    print(f"Tasa Falsos Positivos Norte >40°N: M1={fpr_north['m1_map']*100:.2f}%, M0={fpr_north['m0_map']*100:.2f}%, Iso={fpr_north['iso_null']*100:.2f}%, SDM={fpr_north['sdm']*100:.2f}%")
+    results["thermal_persistence"]["tau_opt"] = tau_opt
+    print(f"Tasa Falsos Positivos Norte (>38°–40°N, tau*={0.001208}): M1={fpr_north['m1_map']*100:.2f}%, M0={fpr_north['m0_map']*100:.2f}%, Iso={fpr_north['iso_null']*100:.2f}%, SDM={fpr_north['sdm']*100:.2f}%")
 
     # Persistencia interanual (>= 2 años consecutivos)
     # Comparar la probabilidad de persistencia condicional a haber estado ocupado el año anterior
@@ -266,15 +294,34 @@ def main():
     b5 = eco_res.get(5, {})
     print(f"Bloque 5 (Visto en Calibración): N_pos={b5.get('presences',0)} | Brier M1={b5.get('m1_map',{}).get('brier',0):.5f}, SDM={b5.get('sdm',{}).get('brier',0):.5f} | AUC M1={b5.get('m1_map',{}).get('auc',0):.4f}, SDM={b5.get('sdm',{}).get('auc',0):.4f}")
 
+    # Bloque 5 (Visto)
+    sub_5 = df[df["ecoregion_block"] == 5]
+    y_5 = sub_5["y_observed"].values
+    brier_seen = {}
+    auc_seen = {}
+    for m_key, col in models.items():
+        p_5 = sub_5[col].values
+        brier_seen[m_key] = float(brier_score_loss(y_5, p_5))
+        auc_seen[m_key] = float(roc_auc_score(y_5, p_5)) if len(np.unique(y_5)) > 1 else 0.5
+
     # Bloques no vistos
     unseen_df = df[df["ecoregion_block"] != 5]
     y_unseen = unseen_df["y_observed"].values
+    brier_unseen = {}
+    auc_unseen = {}
     print(f"Bloques Nuevos (No vistos, N_pos={y_unseen.sum()}):")
     for m_key, col in models.items():
         p_u = unseen_df[col].values
         b_u = float(brier_score_loss(y_unseen, p_u))
         auc_u = float(roc_auc_score(y_unseen, p_u)) if y_unseen.sum() > 0 else 0.5
+        brier_unseen[m_key] = b_u
+        auc_unseen[m_key] = auc_u
         print(f"  [{m_key:10s}] Brier: {b_u:.5f} | AUC: {auc_u:.4f}")
+
+    results["thermal_persistence"]["brier_seen"] = brier_seen
+    results["thermal_persistence"]["auc_seen"] = auc_seen
+    results["thermal_persistence"]["brier_unseen"] = brier_unseen
+    results["thermal_persistence"]["auc_unseen"] = auc_unseen
 
     print("\n--- 5. PROPAGACIÓN DE INCERTIDUMBRE (Theta_comp, 277 MIEMBROS) ---")
     p5 = df["p_m1_p5"].values

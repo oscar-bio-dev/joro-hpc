@@ -36,6 +36,7 @@ struct OccupancyParameters {
     float human_density_H,
     const OccupancyParameters& p = OccupancyParameters{}) noexcept 
 {
+    if (arrivals_A == 0) return 0.0f;
     float logit_val = p.a0 + p.a1_arrival * std::log1p(static_cast<float>(arrivals_A)) +
                       p.a2_human * human_density_H;
     return sigmoid(logit_val);

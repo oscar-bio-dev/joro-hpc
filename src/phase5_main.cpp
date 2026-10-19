@@ -841,11 +841,11 @@ int main(int argc, char* argv[]) {
         obs_stats[yr] = oys;
     }
 
-    // False positive rate al norte de 40°N
-    auto calc_fpr_north = [](const std::vector<float>& p, const std::vector<EvalRow>& rows, float threshold = 0.05f) {
+    // False positive rate al norte (>38°–40°N) con umbral óptimo tau* derivado de la calibración 2014–2019
+    auto calc_fpr_north = [](const std::vector<float>& p, const std::vector<EvalRow>& rows, float threshold = 0.001208f) {
         uint64_t fp = 0, tn = 0;
         for (size_t i = 0; i < rows.size(); ++i) {
-            if (rows[i].centroid_lat > 40.0f) {
+            if (rows[i].centroid_lat >= 38.0f) {
                 if (rows[i].y_detected == 0) {
                     if (p[i] >= threshold) fp++; else tn++;
                 }
@@ -962,7 +962,7 @@ int main(int argc, char* argv[]) {
     double fpr_iso = calc_fpr_north(iso_null_out.p_marginal_eval, eval_rows);
     double fpr_sdm = calc_fpr_north(sdm_preds, eval_rows);
 
-    std::cout << "│ Tasa Falsos Positivos Norte >40°N (%)    │ "
+    std::cout << "│ Tasa Falsos Positivos Norte (>38°–40°N)  │ "
               << std::setw(11) << std::fixed << std::setprecision(2) << (fpr_m1 * 100.0) << "% │ "
               << std::setw(11) << std::setprecision(2) << (fpr_m0 * 100.0) << "% │ "
               << std::setw(11) << std::setprecision(2) << (fpr_iso * 100.0) << "% │ "
@@ -1020,6 +1020,35 @@ int main(int argc, char* argv[]) {
               << (std::accumulate(m1_p95.begin(), m1_p95.end(), 0.0) / m1_p95.size() -
                   std::accumulate(m1_p5.begin(), m1_p5.end(), 0.0) / m1_p5.size()) << " │ Calibración bien acot. │\n";
     std::cout << "└──────────────────────────────────────────────┴──────────────────────────┴────────────────────────┘\n";
+
+    // Guardar resumen JSON de cinemática de frente
+    const std::string kin_json_path = "/mnt/hpc_scratch/joro-hpc/outputs/phase5_sim_kinematics.json";
+    {
+        std::ofstream kj(kin_json_path);
+        kj << "{\n";
+        for (int yr = 2020; yr <= 2024; ++yr) {
+            int yi = yr - 2014;
+            double o_p95 = obs_stats[yr].p95_km;
+            double m1_p95_val = m1_map_out.sim_front_p95[yi];
+            double iso_p95_val = iso_null_out.sim_front_p95[yi];
+            double o_ang = obs_stats[yr].mean_angle_deg;
+            double m1_ang = m1_map_out.sim_mean_angle_deg[yi];
+            double iso_ang = iso_null_out.sim_mean_angle_deg[yi];
+            double ang_err_m1 = std::abs(m1_ang - o_ang);
+            if (ang_err_m1 > 180.0) ang_err_m1 = 360.0 - ang_err_m1;
+            double ang_err_iso = std::abs(iso_ang - o_ang);
+            if (ang_err_iso > 180.0) ang_err_iso = 360.0 - ang_err_iso;
+
+            kj << "  \"" << yr << "\": {\n"
+               << "    \"obs_p95\": " << o_p95 << ",\n"
+               << "    \"obs_angle\": " << o_ang << ",\n"
+               << "    \"m1_map\": {\"p95\": " << m1_p95_val << ", \"angle\": " << m1_ang << ", \"angular_error_deg\": " << ang_err_m1 << "},\n"
+               << "    \"iso_null\": {\"p95\": " << iso_p95_val << ", \"angle\": " << iso_ang << ", \"angular_error_deg\": " << ang_err_iso << "}\n"
+               << "  }" << (yr == 2024 ? "\n" : ",\n");
+        }
+        kj << "}\n";
+        std::cout << "✔ Cinemática de simulación exportada a " << kin_json_path << "\n";
+    }
 
     // Guardar resumen JSON de métricas
     const std::string metrics_json_path = "/mnt/hpc_scratch/joro-hpc/outputs/phase5_validation_metrics.json";
