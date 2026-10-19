@@ -682,7 +682,7 @@ int main(int argc, char* argv[]) {
         // ─────────────────────────────────────────────────────────────────────
         // TABLA 7: TELEMETRÍA HÍBRIDA CPU (OpenMP + AVX-512) + GPU (SYCL / Level-Zero)
         // ─────────────────────────────────────────────────────────────────────
-        constexpr double kLpdmStepsPerEval = 60.0;
+        constexpr double kLpdmStepsPerEval = 168.0;
         std::cout << "\nTABLA 7: TELEMETRÍA HÍBRIDA CPU (" << sa_report.omp_max_threads << " hilos OpenMP) + GPU (" << sa_report.device_description << "):\n";
         std::cout << "┌────────┬──────────┬──────────┬──────────┬──────────┬──────────┬──────────┬──────────┬────────────┬──────────────┐\n";
         std::cout << "│ Cadena │ Total(s) │ ABM CPU  │ GPU kern │ H2D+D2H  │ LPDM host│ Costo CPU│ GPU kern │ Super-part │ Mpart/s      │\n";

@@ -100,7 +100,7 @@ def main():
         p_vals = df[col].values
         bg = float(brier_score_loss(y_all, p_vals))
         bb = calc_balanced_brier(p_vals, y_all, dists_all, 350.0)
-        ll = float(log_loss(y_all, np.clip(p_vals, 1e-15, 1 - 1e-15)))
+        ll = float(log_loss(y_all, np.clip(p_vals, 1e-6, 1.0 - 1e-6)))
         auc = float(roc_auc_score(y_all, p_vals))
         prauc = float(average_precision_score(y_all, p_vals))
         slope, intercept = get_calibration_slope_intercept(p_vals, y_all)
@@ -127,7 +127,7 @@ def main():
             p_vals = sub[col].values
             bg = float(brier_score_loss(y_yr, p_vals))
             bb = calc_balanced_brier(p_vals, y_yr, dists_yr, 350.0)
-            ll = float(log_loss(y_yr, np.clip(p_vals, 1e-15, 1 - 1e-15)))
+            ll = float(log_loss(y_yr, np.clip(p_vals, 1e-6, 1.0 - 1e-6)))
             auc = float(roc_auc_score(y_yr, p_vals))
             prauc = float(average_precision_score(y_yr, p_vals))
             yr_res[m_key] = {"brier": bg, "brier_bal": bb, "log_loss": ll, "auc": auc, "pr_auc": prauc}

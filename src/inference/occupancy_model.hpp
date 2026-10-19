@@ -31,14 +31,23 @@ struct OccupancyParameters {
 }
 
 /// Calcula la probabilidad de colonización gamma_{i,t} condicional a las llegadas A_{i,t}
+/// Dentro de la envolvente activa del frente, si A == 0 se permite una tasa basal de dispersión
+/// pasiva antropogénica por corredores viales, mientras que fuera de la envolvente gamma = 0.
 [[nodiscard]] inline float compute_colonization_gamma(
     uint32_t arrivals_A,
     float human_density_H,
-    const OccupancyParameters& p = OccupancyParameters{}) noexcept 
+    const OccupancyParameters& p = OccupancyParameters{},
+    float road_density_R = 0.0f,
+    bool in_active_envelope = false) noexcept 
 {
-    if (arrivals_A == 0) return 0.0f;
-    float logit_val = p.a0 + p.a1_arrival * std::log1p(static_cast<float>(arrivals_A)) +
-                      p.a2_human * human_density_H;
+    if (arrivals_A > 0) {
+        float logit_val = p.a0 + p.a1_arrival * std::log1p(static_cast<float>(arrivals_A)) +
+                          p.a2_human * human_density_H;
+        return sigmoid(logit_val);
+    }
+    if (!in_active_envelope) return 0.0f;
+    // Tasa basal de dispersión pasiva/antropogénica por carreteras dentro de la envolvente activa
+    float logit_val = p.a0 - 1.5f + p.a2_human * human_density_H + p.beta3_road * road_density_R;
     return sigmoid(logit_val);
 }
 

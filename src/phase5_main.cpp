@@ -52,7 +52,7 @@ constexpr int    kTotalYears = 11;         // 2014..2024
 constexpr int    kCalibYears = 6;          // 2014..2019
 constexpr int    kEvalStartYear = 2020;
 constexpr int    kEvalYears = 5;           // 2020..2024
-constexpr int    kLpdmSteps = 60;          // 60 pasos x 60 s
+constexpr int    kLpdmSteps = 168;         // 168 pasos x 60 s = 168 horas completas de ERA5
 constexpr float  kLpdmDt = 60.0f;
 constexpr double kEnvelopeBaseKm = 50.0;
 
@@ -445,6 +445,19 @@ int main(int argc, char* argv[]) {
         IsotropicKernelDisperser local_iso = iso_disperser;
         local_iso.lambda_m = iso_lambda_km * 1000.0;
 
+        std::vector<float> cell_epi_dist(grid_cells.size());
+        for (size_t i = 0; i < grid_cells.size(); ++i) {
+            cell_epi_dist[i] = static_cast<float>(dist_to_epicenter_km(grid_cells[i].centroid_lat, grid_cells[i].centroid_lon));
+        }
+        float h_min = 1e30f, h_max = -1e30f, r_min = 1e30f, r_max = -1e30f;
+        for (const auto& c : grid_cells) {
+            h_min = std::min(h_min, c.pop_density_h); h_max = std::max(h_max, c.pop_density_h);
+            r_min = std::min(r_min, c.road_density_r); r_max = std::max(r_max, c.road_density_r);
+        }
+        const float h_span = (h_max - h_min) > 0.0f ? (h_max - h_min) : 1.0f;
+        const float r_span = (r_max - r_min) > 0.0f ? (r_max - r_min) : 1.0f;
+        double cummax_front = 0.0;
+
         for (int yi = 0; yi < kTotalYears; ++yi) {
             const int yr = kStartYear + yi;
             const auto& th = thermal_by_year[yi];
@@ -523,12 +536,17 @@ int main(int argc, char* argv[]) {
             }
 
             // 4. Actualización de ocupación latente psi
+            cummax_front = std::max(cummax_front, out.sim_front_p95[yi]);
+            const float active_radius = static_cast<float>(cummax_front + kEnvelopeBaseKm);
+
             #pragma omp parallel for schedule(static)
             for (size_t i = 0; i < grid_cells.size(); ++i) {
                 int32_t cid = grid_cells[i].cell_id;
                 float D = dcnt[cid] ? dsum[cid] / static_cast<float>(dcnt[cid]) : 0.0f;
                 float h_n = (grid_cells[i].pop_density_h - h_min) / h_span;
-                float gamma = joro::inference::compute_colonization_gamma(arr[cid], h_n, occ);
+                float r_n = (grid_cells[i].road_density_r - r_min) / r_span;
+                bool in_env = (cell_epi_dist[i] <= active_radius);
+                float gamma = joro::inference::compute_colonization_gamma(arr[cid], h_n, occ, r_n, in_env);
                 float phi = joro::inference::compute_persistence_phi(adult[cid], D, occ);
                 psi[i] = joro::inference::update_dynamic_occupancy(psi[i], gamma, phi);
             }
@@ -726,7 +744,7 @@ int main(int argc, char* argv[]) {
     auto calc_log_loss = [](const std::vector<float>& p, const std::vector<EvalRow>& rows, int year_filter = 0) {
         double sum = 0.0;
         uint64_t cnt = 0;
-        constexpr double eps = 1e-15;
+        constexpr double eps = 1e-6; // Estándar para evitar penalización espuria de -ln(1e-15)
         for (size_t i = 0; i < rows.size(); ++i) {
             if (year_filter != 0 && rows[i].year != year_filter) continue;
             double p_c = std::clamp(static_cast<double>(p[i]), eps, 1.0 - eps);
@@ -752,10 +770,22 @@ int main(int argc, char* argv[]) {
             return a.first < b.first;
         });
 
-        // Mann-Whitney U
+        // Mann-Whitney U con corrección exacta de empates (average ranks for ties)
         double rank_sum_pos = 0.0;
-        for (size_t i = 0; i < pairs.size(); ++i) {
-            if (pairs[i].second == 1) rank_sum_pos += (i + 1);
+        size_t i = 0;
+        const size_t n = pairs.size();
+        while (i < n) {
+            size_t j = i;
+            while (j < n && pairs[j].first == pairs[i].first) {
+                j++;
+            }
+            double avg_rank = (static_cast<double>(i + 1) + static_cast<double>(j)) / 2.0;
+            for (size_t k = i; k < j; ++k) {
+                if (pairs[k].second == 1) {
+                    rank_sum_pos += avg_rank;
+                }
+            }
+            i = j;
         }
         double u_pos = rank_sum_pos - (static_cast<double>(n_pos) * (n_pos + 1.0) / 2.0);
         return u_pos / (static_cast<double>(n_pos) * n_neg);

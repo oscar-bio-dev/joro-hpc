@@ -1,6 +1,6 @@
 # JORO-HPC — Informe final Fase 4.5: cierre de datos interanuales y reparametrización de identificabilidad
 
-_Generado automáticamente el 2026-10-19 08:15 por `scripts/python/build_phase4_report.py` a partir de los artefactos de la corrida. Los veredictos se calculan con reglas fijas._
+_Generado automáticamente el 2026-10-19 14:13 por `scripts/python/build_phase4_report.py` a partir de los artefactos de la corrida. Los veredictos se calculan con reglas fijas._
 
 - Dispositivo LPDM: **Intel(R) Arc(TM) A380 Graphics | Intel(R) oneAPI Unified Runtime over Level-Zero | GPU** (pruebas); la corrida de producción final será en la Arc A770.
 - Hilos OpenMP: **16**. Evaluaciones por modelo: **2000** (5 cadenas × 400).
@@ -58,13 +58,13 @@ _Generado automáticamente el 2026-10-19 08:15 por `scripts/python/build_phase4_
 
 | Métrica | Fase 4.5 (M1) | Línea base (commit `3fa0d37`) |
 |---|---|---|
-| Tiempo total (2,000 evaluaciones) | **12.4 s** | 25.9 s |
-| H2D + D2H | **0.94 s** (7.6 % de pared) | 2.08 s |
-| Kernel SYCL en GPU | 7.97 s (64.1 % de pared) | — |
-| ABM (OpenMP + AVX-512) | 1.45 s | — |
-| Ocupación + costo (OpenMP) | 0.87 s | — |
-| LPDM host (init + reducción) | 0.50 s | — |
-| Super-partículas despachadas | 237.5 M | — |
+| Tiempo total (2,000 evaluaciones) | **14.1 s** | 25.9 s |
+| H2D + D2H | **1.13 s** (8.0 % de pared) | 2.08 s |
+| Kernel SYCL en GPU | 9.08 s (64.6 % de pared) | — |
+| ABM (OpenMP + AVX-512) | 1.64 s | — |
+| Ocupación + costo (OpenMP) | 0.88 s | — |
+| LPDM host (init + reducción) | 0.57 s | — |
+| Super-partículas despachadas | 203.4 M | — |
 | Despachos con fallback a CPU | **0** | 0 |
 
 Muestreo externo durante la corrida (`sample_telemetry.py`; `intel_gpu_top` requiere CAP_PERFMON, no disponible, por lo que la ocupación GPU se **estima** como 100 % − residencia RC6, que mide actividad del GT, no del motor Compute):
@@ -84,13 +84,13 @@ Componentes normalizados por la escala del punto nominal (1.000 = costo en θ no
 
 | Cadena | semilla | J0 | J* | J̃_llegada (J0 → J*) | J̃_frente (J0 → J*) | J̃_persist. (J0 → J*) | Aceptadas | t (s) |
 |---|---|---|---|---|---|---|---|---|
-| 1 | 1001 | 1.0000 | **0.8683** | 1.0000 → **0.9984** | 1.0000 → **0.6189** | 1.0000 → **0.9875** | 75 % | 2.9 |
-| 2 | 2002 | 0.9260 | **0.8403** | 1.0655 → **1.0193** | 0.6602 → **0.4886** | 1.0524 → **1.0131** | 88 % | 2.8 |
-| 3 | 3003 | 0.9119 | **0.7954** | 1.0474 → **0.9308** | 0.6602 → **0.5719** | 1.0281 → **0.8836** | 79 % | 2.3 |
-| 4 | 4004 | 0.9179 | **0.8073** | 0.9308 → **0.9139** | 0.9400 → **0.6602** | 0.8829 → **0.8480** | 87 % | 2.3 |
-| 5 | 5005 | 1.0305 | **0.8067** | 0.8802 → **1.0201** | 1.4060 → **0.3978** | 0.8052 → **1.0021** | 61 % | 2.1 |
+| 1 | 1001 | 1.0000 | **0.8089** | 1.0000 → **1.0485** | 1.0000 → **0.3477** | 1.0000 → **1.0306** | 70 % | 2.6 |
+| 2 | 2002 | 0.8862 | **0.8100** | 1.0631 → **0.9901** | 0.5521 → **0.4840** | 1.0434 → **0.9558** | 72 % | 3.0 |
+| 3 | 3003 | 0.8820 | **0.8224** | 1.0579 → **1.0517** | 0.5521 → **0.3781** | 1.0362 → **1.0375** | 88 % | 2.0 |
+| 4 | 4004 | 0.9176 | **0.8228** | 0.9733 → **0.9847** | 0.8313 → **0.5521** | 0.9482 → **0.9317** | 60 % | 3.7 |
+| 5 | 5005 | 1.0605 | **0.8024** | 0.8697 → **0.9673** | 1.5150 → **0.5445** | 0.7967 → **0.8953** | 67 % | 2.7 |
 
-**MAP (mejor global):** J = 0.7954; J̃_llegada = **0.9308**, J̃_frente = **0.5719**, J̃_persistencia = **0.8836**.
+**MAP (mejor global):** J = 0.8024; J̃_llegada = **0.9673**, J̃_frente = **0.5445**, J̃_persistencia = **0.8953**.
 
 - Criterio de la tarea 3 (los tres componentes por debajo de 1.00 simultáneamente en el MAP): **✔ CUMPLE**.
 - Línea base previa: J̃_llegada 1.01–1.05, J̃_persistencia ≈1.00.
@@ -101,63 +101,63 @@ Conjunto de calibración: 239,502 filas; llegada 89 pos / 7,326 neg (231,929 aus
 
 | Parámetro | Prior [min, max] | θ̂_MAP | Mediana Θ_comp | P5–P95 Θ_comp |
 |---|---|---|---|---|
-| `t_c` | [-5, 0] | -2.175 | -2.249 | [-3.031, -1.132] |
-| `alpha_damage` | [0.01, 0.1] | 0.02896 | 0.07645 | [0.02896, 0.09546] |
-| `beta_damage` | [1, 3] | 2 | 2 | [1, 3] |
-| `k0` | [1000, 15000] | 9204 | 5424 | [1480, 1.438e+04] |
-| `gamma_hab` | [0, 2] | 0.7963 | 0.6789 | [0.05347, 1.206] |
-| `q_balloon` | [0.1, 0.6] | 0.4722 | 0.3019 | [0.1663, 0.4473] |
-| `q_viab` | [0.2, 0.9] | 0.3518 | 0.7914 | [0.6503, 0.8653] |
-| `a0` | [-6, -1] | -1.329 | -1.424 | [-1.866, -1] |
-| `b0` | [-2, 2.5] | 1.733 | 2.278 | [-0.3852, 2.5] |
+| `t_c` | [-5, 0] | -1.297 | -0.7638 | [-3.986, -0.03961] |
+| `alpha_damage` | [0.01, 0.1] | 0.09337 | 0.09388 | [0.05939, 0.1] |
+| `beta_damage` | [1, 3] | 1 | 1 | [1, 3] |
+| `k0` | [1000, 15000] | 1.463e+04 | 9626 | [1064, 1.493e+04] |
+| `gamma_hab` | [0, 2] | 0.2776 | 0.797 | [0.1267, 1.709] |
+| `q_balloon` | [0.1, 0.6] | 0.1034 | 0.1141 | [0.1, 0.3895] |
+| `q_viab` | [0.2, 0.9] | 0.7346 | 0.7191 | [0.6474, 0.8028] |
+| `a0` | [-6, -1] | -1.095 | -1.772 | [-3.712, -1.016] |
+| `b0` | [-2, 2.5] | 0.3453 | 0.7278 | [0.2014, 2.328] |
 
-Miembros de Θ_comp (ΔJ ≤ 0.05): **277**.
+Miembros de Θ_comp (ΔJ ≤ 0.05): **439**.
 
 **Matriz de correlación de Pearson en Θ_comp (M1):**
 
 | |t_c|alpha_damage|beta_damage|k0|gamma_hab|q_balloon|q_viab|a0|b0|
 |---|---|---|---|---|---|---|---|---|---|
-| **t_c** |+1.00|+0.43|-0.57|+0.68|-0.61|-0.34|+0.41|+0.43|-0.63|
-| **alpha_damage** |+0.43|+1.00|-0.67|+0.69|-0.24|-0.78|+0.22|+0.20|-0.60|
-| **beta_damage** |-0.57|-0.67|+1.00|-0.77|+0.53|+0.68|-0.37|-0.55|+0.81|
-| **k0** |+0.68|+0.69|-0.77|+1.00|-0.69|-0.82|+0.33|+0.67|-0.93|
-| **gamma_hab** |-0.61|-0.24|+0.53|-0.69|+1.00|+0.54|-0.59|-0.77|+0.72|
-| **q_balloon** |-0.34|-0.78|+0.68|-0.82|+0.54|+1.00|-0.27|-0.54|+0.78|
-| **q_viab** |+0.41|+0.22|-0.37|+0.33|-0.59|-0.27|+1.00|+0.54|-0.39|
-| **a0** |+0.43|+0.20|-0.55|+0.67|-0.77|-0.54|+0.54|+1.00|-0.73|
-| **b0** |-0.63|-0.60|+0.81|-0.93|+0.72|+0.78|-0.39|-0.73|+1.00|
+| **t_c** |+1.00|-0.30|-0.77|-0.20|+0.48|-0.65|+0.08|-0.42|+0.17|
+| **alpha_damage** |-0.30|+1.00|+0.15|-0.06|+0.02|+0.13|+0.01|-0.15|+0.39|
+| **beta_damage** |-0.77|+0.15|+1.00|+0.17|-0.41|+0.46|+0.01|+0.39|+0.06|
+| **k0** |-0.20|-0.06|+0.17|+1.00|-0.92|-0.34|+0.56|+0.92|-0.57|
+| **gamma_hab** |+0.48|+0.02|-0.41|-0.92|+1.00|+0.12|-0.43|-0.96|+0.52|
+| **q_balloon** |-0.65|+0.13|+0.46|-0.34|+0.12|+1.00|-0.23|-0.12|-0.01|
+| **q_viab** |+0.08|+0.01|+0.01|+0.56|-0.43|-0.23|+1.00|+0.42|-0.34|
+| **a0** |-0.42|-0.15|+0.39|+0.92|-0.96|-0.12|+0.42|+1.00|-0.55|
+| **b0** |+0.17|+0.39|+0.06|-0.57|+0.52|-0.01|-0.34|-0.55|+1.00|
 
-Mayores |ρ|: `k0`–`b0` = -0.93; `k0`–`q_balloon` = -0.82; `beta_damage`–`b0` = +0.81.
+Mayores |ρ|: `gamma_hab`–`a0` = -0.96; `k0`–`a0` = +0.92; `k0`–`gamma_hab` = -0.92.
 
-- Criterio |ρ| < 0.5 para todos los pares: **✘ NO CUMPLE** (máx |ρ| = 0.93). Línea base: ρ(γ1,γ2) = -0.82, ρ(K0,γ3) = -0.75.
-- ρ(K0, γ_hab) = **-0.69**.
-- Truncamiento de γ_hab en el borde (dentro del 2 % del rango): superior **0.0 %**, inferior **1.1 %** de Θ_comp; P95 = 1.206 (techo 2; el techo anterior de γ₂ era 1.2).
-- K0 en el borde: superior 2.9 %, inferior 3.6 %.
-- a0 en el borde: superior 36.1 %, inferior 0.0 %.
-- b0 en el borde: superior 23.5 %, inferior 0.0 %.
-- Pares con |ρ| ≥ 0.5: **25 de 36**.
-- Parámetros con ≥ 10 % de Θ_comp pegado a un borde del prior: `a0` (superior, 36 %), `b0` (superior, 23 %). Es truncamiento por el prior y limita la interpretación de esos parámetros.
+- Criterio |ρ| < 0.5 para todos los pares: **✘ NO CUMPLE** (máx |ρ| = 0.96). Línea base: ρ(γ1,γ2) = -0.82, ρ(K0,γ3) = -0.75.
+- ρ(K0, γ_hab) = **-0.92**.
+- Truncamiento de γ_hab en el borde (dentro del 2 % del rango): superior **0.0 %**, inferior **3.0 %** de Θ_comp; P95 = 1.709 (techo 2; el techo anterior de γ₂ era 1.2).
+- K0 en el borde: superior 9.3 %, inferior 10.5 %.
+- a0 en el borde: superior 9.8 %, inferior 0.0 %.
+- b0 en el borde: superior 1.8 %, inferior 0.0 %.
+- Pares con |ρ| ≥ 0.5: **9 de 36**.
+- Parámetros con ≥ 10 % de Θ_comp pegado a un borde del prior: `alpha_damage` (superior, 16 %), `k0` (inferior, 10 %), `q_balloon` (inferior, 44 %). Es truncamiento por el prior y limita la interpretación de esos parámetros.
 
 ## 5. Comparación de costo M0 vs M1 vs M3 (mismo presupuesto de evaluaciones por modelo)
 
 | Modelo | K_i | Parámetros libres | J_min | J̃_llegada | J̃_frente | J̃_persist. | Tiempo (s) | Θ_comp |
 |---|---|---|---|---|---|---|---|---|
-| **M1** | K0·exp(γ_hab·H_hab) | 9 | 0.7954 | 0.9308 | 0.5719 | 0.8836 | 12.4 | 277 |
-| **M0** | K0 | 8 | 0.7388 | 0.9138 | 0.4532 | 0.8494 | 8.0 | 134 |
-| **M3** | K0·exp(γ1 Z_imp + γ2 Z_borde + γ3 Z_dosel) | 11 | 0.7869 | 0.9119 | 0.6058 | 0.8431 | 14.6 | 191 |
+| **M1** | K0·exp(γ_hab·H_hab) | 9 | 0.8024 | 0.9673 | 0.5445 | 0.8953 | 14.1 | 439 |
+| **M0** | K0 | 8 | 0.7958 | 0.9885 | 0.4565 | 0.9424 | 12.4 | 74 |
+| **M3** | K0·exp(γ1 Z_imp + γ2 Z_borde + γ3 Z_dosel) | 11 | 0.8129 | 1.0019 | 0.4471 | 0.9898 | 16.4 | 38 |
 
-- ΔJ(M1 − M0) = **+0.0566**; ΔJ(M3 − M1) = **-0.0085**. El costo es un Brier/RMSE normalizado, no una verosimilitud, así que no se calcula AIC; con 2,000 evaluaciones por modelo y una cadena estocástica, diferencias del orden de la variabilidad entre cadenas (ver Sección 3) no son concluyentes.
-- Parsimonia: M1 solo añade γ_hab a M0; en M1 la mediana de γ_hab en Θ_comp es 0.679.
-- Correlaciones en Θ_comp de M3 (sobreparametrizado): `alpha_damage`–`q_balloon` = -0.97; `a0`–`gamma2_borde` = -0.90; `alpha_damage`–`gamma2_borde` = -0.89.
+- ΔJ(M1 − M0) = **+0.0066**; ΔJ(M3 − M1) = **+0.0106**. El costo es un Brier/RMSE normalizado, no una verosimilitud, así que no se calcula AIC; con 2,000 evaluaciones por modelo y una cadena estocástica, diferencias del orden de la variabilidad entre cadenas (ver Sección 3) no son concluyentes.
+- Parsimonia: M1 solo añade γ_hab a M0; en M1 la mediana de γ_hab en Θ_comp es 0.797.
+- Correlaciones en Θ_comp de M3 (sobreparametrizado): `t_c`–`q_balloon` = +0.84; `alpha_damage`–`beta_damage` = -0.83; `beta_damage`–`b0` = +0.77.
 
 ## 6. Aislamiento de `v_evaluation_set` (2020–2024)
 
 - Años de ERA5 abiertos por el simulador: **[2014, 2015, 2016, 2017, 2018, 2019]** → ninguno > 2019.
 - Solicitudes de lectura rechazadas por el guardia del lector: **0**.
 - `v_calibration_set` exporta solo 2014–2019; el calibrador lee únicamente `calibration_set_2014_2019.csv` y el binario aborta si encuentra una fila fuera de 2014–2019.
-- Búsqueda estática de lecturas SQL de `v_evaluation_set` en `scripts/`, `src/` y `tests/`: **0** .
+- Búsqueda estática de lecturas SQL de `v_evaluation_set` en `scripts/`, `src/` y `tests/`: **1** (scripts/python/export_phase5_datasets.py:30).
 - El motor de PostgreSQL no registra lecturas de vistas sin `pg_stat_statements`; la afirmación «0 lecturas» se apoya en las tres comprobaciones anteriores (código, CSV exportado y guardia del lector), no en un contador del servidor.
-- **Veredicto:** ✔ 0 lecturas verificables; lista para desbloquear la Fase 5.
+- **Veredicto:** ✘ revisar.
 
 ## 7. Resumen de criterios de la Fase 4.5
 
@@ -169,7 +169,7 @@ Mayores |ρ|: `k0`–`b0` = -0.93; `k0`–`q_balloon` = -0.82; `beta_damage`–`
 | `ctest` 4/4 | ver nota |
 | J̃_llegada, J̃_frente y J̃_persistencia < 1.00 simultáneamente (MAP) | ✔ |
 | |ρ| < 0.5 en Θ_comp (M1) | ✘ |
-| `v_evaluation_set` con 0 lecturas verificables | ✔ |
+| `v_evaluation_set` con 0 lecturas verificables | ✘ |
 
 _`ctest` se verifica por separado (ver mensaje de commit)._
 

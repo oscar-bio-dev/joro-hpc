@@ -67,7 +67,7 @@ constexpr float  kEpiLat = 34.13816f;      // Braselton, GA (epicentro de la int
 constexpr float  kEpiLon = -83.75723f;
 constexpr int    kFirstYear = 2014;
 constexpr int    kNYears = 6;              // 2014..2019 (la ventana 2020-2024 NO se carga jamás)
-constexpr int    kLpdmSteps = 60;          // Igual que el cribado de Morris (Fase 3): 60 pasos x 60 s
+constexpr int    kLpdmSteps = 168;         // 168 pasos x 60 s = 168 horas completas de ERA5
 constexpr float  kLpdmDt = 60.0f;
 constexpr double kEnvelopeBaseKm = 50.0;   // Alcance potencial base alrededor del frente observado
 
@@ -112,11 +112,13 @@ struct PreparedCalibration {
     size_t n_slots = 0;
     std::array<size_t, kNYears + 1> year_begin{};
     std::vector<int32_t> cell_id;
-    std::vector<int32_t> slot;      // posición densa de la celda para el estado latente psi
-    std::vector<float>   h_norm;    // H_i normalizada a [0,1] por su máximo en el dominio
-    std::vector<float>   p_det;     // p_{i,t} (Sección 9) con el esfuerzo TGB
+    std::vector<int32_t> slot;        // posición densa de la celda para el estado latente psi
+    std::vector<float>   h_norm;      // H_i normalizada a [0,1] por su máximo en el dominio
+    std::vector<float>   r_norm;      // R_i normalizada a [0,1]
+    std::vector<uint8_t> in_envelope; // 1 si d_km <= radius de la envolvente activa
+    std::vector<float>   p_det;       // p_{i,t} (Sección 9) con el esfuerzo TGB
     std::vector<uint8_t> cat;
-    std::vector<float>   psi_init;  // psi_{2013}: 1 en celdas semilla
+    std::vector<float>   psi_init;    // psi_{2013}: 1 en celdas semilla
     std::vector<double>  obs_front_km;
     CalibrationStratification strat;
 };
@@ -195,6 +197,8 @@ PreparedCalibration prepare_calibration(
     cal.cell_id.resize(cal.n_rows);
     cal.slot.resize(cal.n_rows);
     cal.h_norm.resize(cal.n_rows);
+    cal.r_norm.resize(cal.n_rows);
+    cal.in_envelope.resize(cal.n_rows);
     cal.p_det.resize(cal.n_rows);
     cal.cat.assign(cal.n_rows, CAT_NONE);
     cal.obs_front_km.assign(kNYears, 0.0);
@@ -222,16 +226,19 @@ PreparedCalibration prepare_calibration(
             cal.cell_id[r] = o.cell_id;
             cal.slot[r] = s;
             cal.h_norm[r] = (o.pop_density_h - h_min) / h_span;
+            cal.r_norm[r] = (o.road_density_r - r_min) / r_span;
             int32_t effort = o.effort_araneae;
             if (synthetic_effort && o.y_detected == 1) { effort = median_effort[yi]; cal.strat.effort_imputed_rows++; }
             cal.p_det[r] = compute_detection_prob(effort, (o.pop_density_h - h_min) / h_span, (o.road_density_r - r_min) / r_span);
 
             const double d_km = dist_to_epicenter_km(o.centroid_lat, o.centroid_lon);
+            const bool in_env = (d_km <= radius);
+            cal.in_envelope[r] = in_env ? 1 : 0;
             const uint8_t yprev = last_y[s];
             uint8_t c = CAT_NONE;
             if (yprev == 0) {
                 if (o.y_detected == 1)        { c = CAT_ARR_POS; cal.strat.arrival_pos++; }
-                else if (d_km <= radius)      { c = CAT_ARR_NEG; cal.strat.arrival_neg++; }
+                else if (in_env)              { c = CAT_ARR_NEG; cal.strat.arrival_neg++; }
                 else                          { cal.strat.outside_envelope++; }
             } else {
                 if (o.y_detected == 1)        { c = CAT_PER_POS; cal.strat.persistence_pos++; }
@@ -400,7 +407,7 @@ CostComponents evaluate_candidate(
             const float D = ctx.dcnt[cid] ? ctx.dsum[cid] / static_cast<float>(ctx.dcnt[cid]) : 0.0f;
 
             // logit(gamma) = a0 + a1 log(1 + A) + a2 H ;  logit(phi) = b0 + b1 log(1 + N) - b2 D
-            const float gamma = compute_colonization_gamma(ctx.arr[cid], cal.h_norm[r], occ);
+            const float gamma = compute_colonization_gamma(ctx.arr[cid], cal.h_norm[r], occ, cal.r_norm[r], cal.in_envelope[r] != 0);
             const float phi = compute_persistence_phi(ctx.adult[cid], D, occ);
             const int32_t s = cal.slot[r];
             // psi_t = (1 - psi_{t-1}) gamma + psi_{t-1} phi   (cada slot aparece una sola vez por año)

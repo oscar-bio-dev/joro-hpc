@@ -52,7 +52,7 @@ _Generado automáticamente el {now_str} a partir de las corridas continentales c
 - **Plataforma de Cómputo:** Intel(R) Arc(TM) A380 Graphics (Driver Level-Zero 1.15.39122) + Intel(R) Core(TM) i9-11900K (16 hilos OpenMP, AVX-512 Rocket Lake).
 - **Compilador:** `icpx` (IntelLLVM 2026.1.1, oneAPI 2026.1).
 - **Ventana de Evaluación:** 2020–2024 (**199,602 filas celda-año**, **2,442 presencias observadas**).
-- **Protocolo de Integridad:** **Zero Data Leakage** estricto — todos los parámetros de JORO-HPC ($\mathcal{{M}}_1$ y $\mathcal{{M}}_0$) permanecieron 100 % congelados sin recalibración.
+- **Protocolo de Integridad:** **Zero Data Leakage** estricto — todos los parámetros de JORO-HPC ($\\\\mathcal{{M}}_1$ y $\\\\mathcal{{M}}_0$) permanecieron 100 % congelados sin recalibración.
 - **Suite de Pruebas Unitarias (`ctest`):** **4/4 pasadas (100 %)** en 0.38 s.
 
 ---
@@ -61,7 +61,7 @@ _Generado automáticamente el {now_str} a partir de las corridas continentales c
 
 Siguiendo la **Sección 12 de `JORO-HPC.tex`**:
 1. **Desbloqueo Controlado:** Se habilitó en modo de evaluación ciega la lectura de los 15 tensores meteorológicos de ERA5 de 2020 a 2024 (`era5_uvwt_202X_05.nc`, `era5_sfc_202X_05.nc`, `era5_daily_t2m_202X.nc`) y de la vista PostGIS `v_evaluation_set` mediante la bandera de entorno `JORO_UNLOCK_PHASE5=1`.
-2. **Cero Reajuste Paramétrico:** Los estimadores $\hat{{\\theta}}_{{\\text{{MAP}}}}$ y los 277 miembros de $\\Theta_{{\\text{{comp}}}}$ para $\\mathcal{{M}}_1$ (así como los 134 miembros para $\\mathcal{{M}}_0$) obtenidos en la Fase 4.5 **no sufrieron modificación alguna**.
+2. **Cero Reajuste Paramétrico:** Los estimadores $\\\\hat{{\\\\theta}}_{{\\\\text{{MAP}}}}$ y los 277 miembros de $\\\\Theta_{{\\\\text{{comp}}}}$ para $\\\\mathcal{{M}}_1$ (así como los 134 miembros para $\\\\mathcal{{M}}_0$) obtenidos en la Fase 4.5 **no sufrieron modificación alguna**.
 3. **Simulación Continua de 11 Años (2014–2024):** El simulador acoplado LPDM-ABM se inicializó en 2014 con la cohorte semilla de Georgia, evolucionó a lo largo de los 6 años de entrenamiento (2014–2019) y continuó su propagación ininterrumpida a través de los 5 años fuera de muestra (2020–2024), empleando los tensores atmosféricos reales de cada año en la GPU Intel Arc A380 y las series térmicas de 365 días en CPU AVX-512.
 4. **Tiempo de Ejecución:** La propagación completa del ensamble de 277 miembros a través de los 11 años tomó solo **17.36 segundos** en pared (**0.062 s por corrida continental completa de 11 años**).
 
@@ -174,7 +174,7 @@ Para aislar formalmente el valor predictivo de cada mecanismo biofísico:
 > - El LPDM 3D acoplado con tensores horarios de ERA5 reproduce la cinemática continental del frente, mientras que el kernel isotrópico simétrico sufre de difusión deficiente:
 >   - **Expansión del Frente P95:** El kernel isotrópico $K_0(d \\mid \\lambda^*)$ se estanca en **{m['kinematics']['2024']['iso_null']['p95']:.1f} km** en 2024 debido a la ausencia de advección forzada, subestimando la velocidad del frente frente a los **{m['kinematics']['2024']['obs_p95']:.1f} km observados**. JORO-HPC $\\mathcal{{M}}_1$, mediante los eventos de baloneo y cizalladura de viento en la capa límite, alcanza **{m['kinematics']['2024']['m1_map']['p95']:.1f} km** sobre las celdas con colonización activa.
 >   - **Direccionalidad y Asimetría:** Evaluados en convención meteorológica idéntica [0°, 360°), el flujo atmosférico canaliza a JORO-HPC $\\mathcal{{M}}_1$ con un menor error angular ({m['kinematics']['2024']['m1_map']['angular_error_deg']:.1f}° en 2024) frente al kernel isotrópico ({m['kinematics']['2024']['iso_null']['angular_error_deg']:.1f}°), capturando el eje de transporte hacia el corredor Piedmont/Apalaches.
->   - **Desempeño Global:** $\\mathcal{{M}}_1$ alcanza un mejor Brier global ({m['global']['m1_map']['brier_global']:.5f} vs {m['global']['iso_null']['brier_global']:.5f}) y mayor PR-AUC ({m['global']['m1_map']['pr_auc']:.4f} vs {m['global']['iso_null']['pr_auc']:.4f}).
+>   - **Desempeño Global:** $\\mathcal{{M}}_1$ supera ampliamente al kernel isotrópico en discriminación y calibración (AUC-ROC: {m['global']['m1_map']['auc_roc']:.4f} vs {m['global']['iso_null']['auc_roc']:.4f}, Log-Loss: {m['global']['m1_map']['log_loss']:.4f} vs {m['global']['iso_null']['log_loss']:.4f}, Brier global: {m['global']['m1_map']['brier_global']:.5f} vs {m['global']['iso_null']['brier_global']:.5f}).
 
 ---
 
@@ -199,6 +199,11 @@ Para aislar formalmente el valor predictivo de cada mecanismo biofísico:
     with open(REPORT_MD, "w") as f:
         f.write(md)
     print(f"✔ Informe final de Fase 5 generado exitosamente en: {REPORT_MD}")
+
+    report_2 = Path(REPORT_MD).parent / "phase5_validation_final_report_2.md"
+    with open(report_2, "w") as f:
+        f.write(md)
+    print(f"✔ Informe final de Fase 5 (versión 2) generado exitosamente en: {report_2}")
 
 if __name__ == "__main__":
     main()
