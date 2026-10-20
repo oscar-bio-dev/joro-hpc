@@ -20,7 +20,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# Constantes sincronizadas con Sección 6 y 13 de JORO-HPC.tex
+# Constantes sincronizadas con Sección 6 y 13 de JORO-HPC_Research_Proposal.tex
 STUDY_BBOX = (-95.0, 25.0, -70.0, 45.0)  # (lon_min, lat_min, lon_max, lat_max)
 YEARS_CALIBRATION = list(range(2014, 2020))  # 2014-2019
 YEARS_EVALUATION = list(range(2020, 2025))  # 2020-2024

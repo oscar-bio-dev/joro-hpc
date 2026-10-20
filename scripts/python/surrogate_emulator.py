@@ -2,7 +2,7 @@
 """
 JORO-HPC  ·  scripts/python/surrogate_emulator.py
 Plan B: Emulador subrogado (Gaussian Process / Random Forest) sobre Latin Hypercube.
-Sección 13.3 de JORO-HPC.tex.
+Sección 13.3 de JORO-HPC_Research_Proposal.tex.
 
 Se activa si el tiempo proyectado de calibración supera los 15 días continuos
 o el costo por evaluación excede los 300 segundos.

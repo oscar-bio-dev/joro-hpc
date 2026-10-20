@@ -1,8 +1,8 @@
-# JORO-HPC — Informe final Fase 4.5: cierre de datos interanuales y reparametrización de identificabilidad
+# JORO-HPC — Calibración inversa 2014–2019: datos, identificabilidad y ensamble de parámetros compatibles (Θ_comp)
 
-_Generado automáticamente el 2026-10-19 14:13 por `scripts/python/build_phase4_report.py` a partir de los artefactos de la corrida. Los veredictos se calculan con reglas fijas._
+_Generado automáticamente el 2026-10-19 20:07 por `scripts/python/generate_calibration_report.py` a partir de los artefactos de la corrida. Los veredictos se calculan con reglas fijas._
 
-- Dispositivo LPDM: **Intel(R) Arc(TM) A380 Graphics | Intel(R) oneAPI Unified Runtime over Level-Zero | GPU** (pruebas); la corrida de producción final será en la Arc A770.
+- Dispositivo LPDM: **Intel(R) Arc(TM) A380 Graphics | Intel(R) oneAPI Unified Runtime over Level-Zero | GPU**.
 - Hilos OpenMP: **16**. Evaluaciones por modelo: **2000** (5 cadenas × 400).
 
 ## 1. Ingesta de datos
@@ -17,11 +17,11 @@ _Generado automáticamente el 2026-10-19 14:13 por `scripts/python/build_phase4_
 | 2017 | ✔ 157.3 MB | ✔ 13.2 MB | ✔ 12.2 MB | calibración (leído) |
 | 2018 | ✔ 159.5 MB | ✔ 13.2 MB | ✔ 12.3 MB | calibración (leído) |
 | 2019 | ✔ 160.9 MB | ✔ 13.2 MB | ✔ 12.3 MB | calibración (leído) |
-| 2020 | ✔ 158.5 MB | ✔ 13.2 MB | ✔ 12.3 MB | reservado Fase 5 (NO leído) |
-| 2021 | ✔ 161.3 MB | ✔ 13.1 MB | ✔ 12.2 MB | reservado Fase 5 (NO leído) |
-| 2022 | ✔ 154.3 MB | ✔ 13.2 MB | ✔ 12.4 MB | reservado Fase 5 (NO leído) |
-| 2023 | ✔ 152.6 MB | ✔ 13.1 MB | ✔ 12.3 MB | reservado Fase 5 (NO leído) |
-| 2024 | ✔ 158.0 MB | ✔ 13.1 MB | ✔ 12.2 MB | reservado Fase 5 (NO leído) |
+| 2020 | ✔ 158.5 MB | ✔ 13.2 MB | ✔ 12.3 MB | reservado para validación (NO leído) |
+| 2021 | ✔ 161.3 MB | ✔ 13.1 MB | ✔ 12.2 MB | reservado para validación (NO leído) |
+| 2022 | ✔ 154.3 MB | ✔ 13.2 MB | ✔ 12.4 MB | reservado para validación (NO leído) |
+| 2023 | ✔ 152.6 MB | ✔ 13.1 MB | ✔ 12.3 MB | reservado para validación (NO leído) |
+| 2024 | ✔ 158.0 MB | ✔ 13.1 MB | ✔ 12.2 MB | reservado para validación (NO leído) |
 
 - Archivos ERA5 efectivamente abiertos por el simulador: **21**; años distintos leídos: **[2014, 2015, 2016, 2017, 2018, 2019]**.
 - Solicitudes bloqueadas por la regla de aislamiento (año > 2019): **[]**.
@@ -49,21 +49,21 @@ _Generado automáticamente el 2026-10-19 14:13 por `scripts/python/build_phase4_
 | 2017 | 39,917 | 2,666 | 39 | 1,219 | 25 | 5 |
 | 2018 | 39,917 | 4,904 | 52 | 1,917 | 35 | 26 |
 | 2019 | 39,917 | 7,379 | 118 | 3,001 | 41 | 72 |
-| 2020–2024 | — | reservado para la Fase 5: el informe no consulta estos años | | | | |
+| 2020–2024 | — | reservado para la validación fuera de muestra: este informe no consulta estos años | | | | |
 
 - Método: conteo de registros georreferenciados (`hasCoordinate`, sin problemas geoespaciales) asignados a la celda por punto en la celda EPSG:5070; `effort = GREATEST(conteo, joro_count)`. Respaldo previo: `cell_annual_observations_effort_density_backup`.
 - `v_calibration_set`: años **2014–2019**, 239,502 filas, 106 presencias.
 
 ## 2. Telemetría de tiempos y utilización GPU/CPU (M1, modelo principal)
 
-| Métrica | Fase 4.5 (M1) | Línea base (commit `3fa0d37`) |
+| Métrica | Calibración actual (M1) | Línea base (commit `3fa0d37`) |
 |---|---|---|
-| Tiempo total (2,000 evaluaciones) | **14.1 s** | 25.9 s |
-| H2D + D2H | **1.13 s** (8.0 % de pared) | 2.08 s |
-| Kernel SYCL en GPU | 9.08 s (64.6 % de pared) | — |
-| ABM (OpenMP + AVX-512) | 1.64 s | — |
-| Ocupación + costo (OpenMP) | 0.88 s | — |
-| LPDM host (init + reducción) | 0.57 s | — |
+| Tiempo total (2,000 evaluaciones) | **13.2 s** | 25.9 s |
+| H2D + D2H | **1.06 s** (8.0 % de pared) | 2.08 s |
+| Kernel SYCL en GPU | 8.48 s (64.3 % de pared) | — |
+| ABM (OpenMP + AVX-512) | 1.63 s | — |
+| Ocupación + costo (OpenMP) | 0.75 s | — |
+| LPDM host (init + reducción) | 0.56 s | — |
 | Super-partículas despachadas | 203.4 M | — |
 | Despachos con fallback a CPU | **0** | 0 |
 
@@ -71,12 +71,12 @@ Muestreo externo durante la corrida (`sample_telemetry.py`; `intel_gpu_top` requ
 
 | Recurso | media | P95 | máx |
 |---|---|---|---|
-| CPU, promedio de 16 hilos (%) | 63.7 | 100.0 | 100.0 |
-| GPU activa (100 − RC6, %) | 91.0 | 100.0 | 100.0 |
-| Frecuencia GPU (MHz) | 1838 | 2450 | 2450 |
-| Potencia GPU (W) | 30.8 | 41.0 | 41.7 |
+| CPU, promedio de 16 hilos (%) | 66.7 | 100.0 | 100.0 |
+| GPU activa (100 − RC6, %) | 91.9 | 100.0 | 100.0 |
+| Frecuencia GPU (MHz) | 1773 | 2450 | 2450 |
+| Potencia GPU (W) | 30.5 | 39.3 | 39.9 |
 
-Hilos con carga media > 80 %: **0 de 16**.
+Hilos con carga media > 80 %: **1 de 16**.
 
 ## 3. Convergencia de las 5 cadenas (M1)
 
@@ -84,15 +84,15 @@ Componentes normalizados por la escala del punto nominal (1.000 = costo en θ no
 
 | Cadena | semilla | J0 | J* | J̃_llegada (J0 → J*) | J̃_frente (J0 → J*) | J̃_persist. (J0 → J*) | Aceptadas | t (s) |
 |---|---|---|---|---|---|---|---|---|
-| 1 | 1001 | 1.0000 | **0.8089** | 1.0000 → **1.0485** | 1.0000 → **0.3477** | 1.0000 → **1.0306** | 70 % | 2.6 |
-| 2 | 2002 | 0.8862 | **0.8100** | 1.0631 → **0.9901** | 0.5521 → **0.4840** | 1.0434 → **0.9558** | 72 % | 3.0 |
-| 3 | 3003 | 0.8820 | **0.8224** | 1.0579 → **1.0517** | 0.5521 → **0.3781** | 1.0362 → **1.0375** | 88 % | 2.0 |
-| 4 | 4004 | 0.9176 | **0.8228** | 0.9733 → **0.9847** | 0.8313 → **0.5521** | 0.9482 → **0.9317** | 60 % | 3.7 |
-| 5 | 5005 | 1.0605 | **0.8024** | 0.8697 → **0.9673** | 1.5150 → **0.5445** | 0.7967 → **0.8953** | 67 % | 2.7 |
+| 1 | 1001 | 1.0000 | **0.8089** | 1.0000 → **1.0485** | 1.0000 → **0.3477** | 1.0000 → **1.0306** | 70 % | 2.4 |
+| 2 | 2002 | 0.8862 | **0.8100** | 1.0631 → **0.9901** | 0.5521 → **0.4840** | 1.0434 → **0.9558** | 72 % | 2.7 |
+| 3 | 3003 | 0.8820 | **0.8224** | 1.0579 → **1.0517** | 0.5521 → **0.3781** | 1.0362 → **1.0375** | 88 % | 1.8 |
+| 4 | 4004 | 0.9176 | **0.8228** | 0.9733 → **0.9847** | 0.8313 → **0.5521** | 0.9482 → **0.9317** | 60 % | 3.6 |
+| 5 | 5005 | 1.0605 | **0.8024** | 0.8697 → **0.9673** | 1.5150 → **0.5445** | 0.7967 → **0.8953** | 67 % | 2.6 |
 
 **MAP (mejor global):** J = 0.8024; J̃_llegada = **0.9673**, J̃_frente = **0.5445**, J̃_persistencia = **0.8953**.
 
-- Criterio de la tarea 3 (los tres componentes por debajo de 1.00 simultáneamente en el MAP): **✔ CUMPLE**.
+- Criterio de convergencia (los tres componentes por debajo de 1.00 simultáneamente en el MAP): **✔ CUMPLE**.
 - Línea base previa: J̃_llegada 1.01–1.05, J̃_persistencia ≈1.00.
 
 Conjunto de calibración: 239,502 filas; llegada 89 pos / 7,326 neg (231,929 ausencias lejanas excluidas); persistencia 17 pos / 141 neg. Esfuerzo real (conteos GBIF, sin imputación).
@@ -142,9 +142,9 @@ Mayores |ρ|: `gamma_hab`–`a0` = -0.96; `k0`–`a0` = +0.92; `k0`–`gamma_hab
 
 | Modelo | K_i | Parámetros libres | J_min | J̃_llegada | J̃_frente | J̃_persist. | Tiempo (s) | Θ_comp |
 |---|---|---|---|---|---|---|---|---|
-| **M1** | K0·exp(γ_hab·H_hab) | 9 | 0.8024 | 0.9673 | 0.5445 | 0.8953 | 14.1 | 439 |
-| **M0** | K0 | 8 | 0.7958 | 0.9885 | 0.4565 | 0.9424 | 12.4 | 74 |
-| **M3** | K0·exp(γ1 Z_imp + γ2 Z_borde + γ3 Z_dosel) | 11 | 0.8129 | 1.0019 | 0.4471 | 0.9898 | 16.4 | 38 |
+| **M1** | K0·exp(γ_hab·H_hab) | 9 | 0.8024 | 0.9673 | 0.5445 | 0.8953 | 13.2 | 439 |
+| **M0** | K0 | 8 | 0.7958 | 0.9885 | 0.4565 | 0.9424 | 12.0 | 74 |
+| **M3** | K0·exp(γ1 Z_imp + γ2 Z_borde + γ3 Z_dosel) | 11 | 0.8129 | 1.0019 | 0.4471 | 0.9898 | 16.1 | 38 |
 
 - ΔJ(M1 − M0) = **+0.0066**; ΔJ(M3 − M1) = **+0.0106**. El costo es un Brier/RMSE normalizado, no una verosimilitud, así que no se calcula AIC; con 2,000 evaluaciones por modelo y una cadena estocástica, diferencias del orden de la variabilidad entre cadenas (ver Sección 3) no son concluyentes.
 - Parsimonia: M1 solo añade γ_hab a M0; en M1 la mediana de γ_hab en Θ_comp es 0.797.
@@ -155,11 +155,11 @@ Mayores |ρ|: `gamma_hab`–`a0` = -0.96; `k0`–`a0` = +0.92; `k0`–`gamma_hab
 - Años de ERA5 abiertos por el simulador: **[2014, 2015, 2016, 2017, 2018, 2019]** → ninguno > 2019.
 - Solicitudes de lectura rechazadas por el guardia del lector: **0**.
 - `v_calibration_set` exporta solo 2014–2019; el calibrador lee únicamente `calibration_set_2014_2019.csv` y el binario aborta si encuentra una fila fuera de 2014–2019.
-- Búsqueda estática de lecturas SQL de `v_evaluation_set` en `scripts/`, `src/` y `tests/`: **1** (scripts/python/export_phase5_datasets.py:30).
+- Búsqueda estática de lecturas SQL de `v_evaluation_set` en `scripts/`, `src/` y `tests/`: **1** (scripts/python/export_validation_datasets.py:30).
 - El motor de PostgreSQL no registra lecturas de vistas sin `pg_stat_statements`; la afirmación «0 lecturas» se apoya en las tres comprobaciones anteriores (código, CSV exportado y guardia del lector), no en un contador del servidor.
 - **Veredicto:** ✘ revisar.
 
-## 7. Resumen de criterios de la Fase 4.5
+## 7. Resumen de criterios de aceptación
 
 | Criterio | Estado |
 |---|---|
@@ -171,5 +171,5 @@ Mayores |ρ|: `gamma_hab`–`a0` = -0.96; `k0`–`a0` = +0.92; `k0`–`gamma_hab
 | |ρ| < 0.5 en Θ_comp (M1) | ✘ |
 | `v_evaluation_set` con 0 lecturas verificables | ✘ |
 
-_`ctest` se verifica por separado (ver mensaje de commit)._
+_`ctest` (4/4) se verifica por separado; ver `docs/RUNBOOK.md`._
 

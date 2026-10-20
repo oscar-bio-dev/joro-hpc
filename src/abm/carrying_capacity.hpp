@@ -9,7 +9,7 @@
 
 namespace joro::abm {
 
-/// Modelos candidatos de capacidad de carga (Sección 8.4 de JORO-HPC_v1.1.tex:
+/// Modelos candidatos de capacidad de carga (Sección 8.4 de JORO-HPC_Research_Proposal.tex:
 /// "Se compararán modelos completos, univariados y K_i = K_0").
 enum class CarryingModel : int {
     M0 = 0,  ///< K_i = K_0                                   (gamma_hab = 0; 8 parámetros libres)
@@ -25,7 +25,7 @@ enum class CarryingModel : int {
     }
 }
 
-/// Parámetros de capacidad de carga K_i (Sección 8.4 de JORO-HPC.tex)
+/// Parámetros de capacidad de carga K_i (Sección 8.4 de JORO-HPC_Research_Proposal.tex)
 struct CarryingCapacityParams {
     float k0 = 5000.0f;           ///< Capacidad de carga base en hábitat promedio
     float gamma1_imp = 0.45f;     ///< Coeficiente para impermeabilidad urbana Z_imp          (M3)

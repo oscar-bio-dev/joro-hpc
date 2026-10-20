@@ -6,7 +6,7 @@ para el ciclo anual completo (365 días/año de 2014 a 2019 sobre la malla 81 x 
 
 Sincronizado estrictamente con:
   - Dominio espacial: Lat [25.0, 45.0] (81 celdas, res 0.25°), Lon [-95.0, -70.0] (101 celdas, res 0.25°)
-  - Sección 8 de JORO-HPC.tex (Termorregulación, Q10 y Daño Térmico Invernal D_{j,t})
+  - Sección 8 de JORO-HPC_Research_Proposal.tex (Termorregulación, Q10 y Daño Térmico Invernal D_{j,t})
   - Salida: /mnt/hpc_scratch/joro-hpc/era5_nc_active/era5_daily_t2m_2014_2019.nc
 """
 

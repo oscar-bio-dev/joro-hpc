@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-JORO-HPC · scripts/python/compute_phase5_metrics.py
-Calcula exhaustivamente todas las métricas oficiales de la Fase 5 para:
+JORO-HPC · scripts/python/compute_validation_metrics.py
+Calcula exhaustivamente todas las métricas oficiales de la validación fuera de muestra (2020–2024) para:
   - JORO-HPC M1 (MAP y Ensamble)
   - JORO-HPC M0 (K0 constante)
   - Kernel Exponencial Isotrópico (Null H2)
@@ -17,7 +17,7 @@ from sklearn.metrics import roc_auc_score, average_precision_score, brier_score_
 from sklearn.linear_model import LinearRegression
 
 PRED_CSV = "/mnt/hpc_scratch/joro-hpc/outputs/predictions_2020_2024_ensemble.csv"
-OUT_JSON = "/mnt/hpc_scratch/joro-hpc/outputs/phase5_validation_metrics.json"
+OUT_JSON = "/mnt/hpc_scratch/joro-hpc/outputs/validation_metrics.json"
 
 EPI_LAT = 34.13816
 EPI_LON = -83.75723
@@ -68,7 +68,7 @@ def calc_balanced_brier(p, y, dists, radius=350.0):
     return float(0.5 * (b_pos + b_neg))
 
 def main():
-    print("▶ Cargando predicciones de ensamble de Fase 5...")
+    print("▶ Cargando predicciones de ensamble (validación 2020–2024)...")
     df = pd.read_csv(PRED_CSV)
     print(f"✔ Cargadas {len(df)} filas celda-año (2020–2024).")
 
@@ -175,7 +175,7 @@ def main():
         kin[yr] = yr_kin
         print(f"Año {yr} | Obs P95: {o_p95:.1f} km, M1 P95: {yr_kin['m1_map']['p95']:.1f} km, Iso P95: {yr_kin['iso_null']['p95']:.1f} km | Error Ang M1: {yr_kin['m1_map']['angular_error_deg']:.1f}°, Iso: {yr_kin['iso_null']['angular_error_deg']:.1f}°")
 
-    sim_kin_path = "/mnt/hpc_scratch/joro-hpc/outputs/phase5_sim_kinematics.json"
+    sim_kin_path = "/mnt/hpc_scratch/joro-hpc/outputs/validation_sim_kinematics.json"
     if os.path.exists(sim_kin_path):
         with open(sim_kin_path) as kf:
             sim_kin = json.load(kf)
@@ -323,7 +323,7 @@ def main():
     results["thermal_persistence"]["brier_unseen"] = brier_unseen
     results["thermal_persistence"]["auc_unseen"] = auc_unseen
 
-    print("\n--- 5. PROPAGACIÓN DE INCERTIDUMBRE (Theta_comp, 277 MIEMBROS) ---")
+    print("\n--- 5. PROPAGACIÓN DE INCERTIDUMBRE (Theta_comp) ---")
     p5 = df["p_m1_p5"].values
     p95 = df["p_m1_p95"].values
     med = df["p_m1_median"].values
@@ -340,8 +340,13 @@ def main():
         yearly_cov[yr] = {"obs": obs_sum, "p5": p5_sum, "median": med_sum, "p95": p95_sum, "in_90_pi": in_pi}
         print(f"Año {yr}: Obs={obs_sum:4d} | Intervalo 90% P5-P95: [{p5_sum:6.1f}, {p95_sum:6.1f}] | Cubierto: {in_pi}")
 
+    try:
+        with open("/mnt/hpc_scratch/joro-hpc/checkpoints/calibration_summary_M1.json") as fh:
+            ensemble_size = int(json.load(fh)["compatible_members"])
+    except (OSError, KeyError, ValueError):
+        ensemble_size = None
     results["uncertainty"] = {
-        "ensemble_size": 277,
+        "ensemble_size": ensemble_size,
         "mean_band_width": float(np.mean(p95 - p5)),
         "yearly_aggregated_coverage": yearly_cov
     }

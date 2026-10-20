@@ -139,8 +139,10 @@ joro-hpc/
 ├── containers/
 │   └── joro_hpc.def                   # Production Apptainer recipe (oneAPI + NetCDF + PostGIS)
 ├── docs/
-│   ├── JORO-HPC.tex                   # Formal scientific research project proposal
-│   └── archive/
+│   ├── RUNBOOK.md                     # Operational checklist (build, run, validate)
+│   ├── proposal/                      # JORO-HPC_Research_Proposal.{tex,pdf}
+│   ├── reports/                       # 01..04 verification, calibration & validation reports
+│   └── telemetry/                     # calibration_hardware_profile.json
 ├── scripts/
 │   ├── sql/
 │   │   ├── 01_schema_postgis.sql      # EPSG:5070 5km grid, NLCD covariates, TGB Araneae effort
@@ -155,7 +157,7 @@ joro-hpc/
 │       ├── surrogate_emulator.py      # Plan B: Latin Hypercube (500 pts) + Gaussian Process
 │       └── requirements.txt
 ├── src/
-│   ├── main.cpp                       # Coupled annual simulation loop orchestrator & Phase 3 runner
+│   ├── main.cpp                       # Coupled annual simulation loop orchestrator, calibration (`--calibrate`), transect (`--transect`) & Morris (`--morris`) runner
 │   ├── common/                        # types.hpp, config_parser.hpp, spatial_grid_lookup.hpp (O(1))
 │   ├── io/                            # era5_netcdf_reader, postgis_client
 │   ├── lpdm/                          # lpdm_engine, cpu_baseline, sycl_kernel, langevin, settling
@@ -228,8 +230,8 @@ ctest --test-dir build --output-on-failure
 # Run coupled simulation executable (Comparative Benchmark CPU vs Arc A380 GPU)
 ./build/joro_hpc --engine both
 
-# Run Phase 3: Annual Daily Thermal Forcing (365 days), Latitudinal Transect & Morris Screening
-./build/joro_hpc --engine gpu --phase3
+# Latitudinal transect & Morris screening diagnostics (alias: --diagnostics, legacy: --phase3)
+./build/joro_hpc --engine gpu --transect --morris
 ```
 
 ---

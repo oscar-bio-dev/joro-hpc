@@ -1,0 +1,199 @@
+{
+  "schema": "joro-hpc/calibration_hardware_profile/v1",
+  "generated": "2026-10-19 20:07:11",
+  "platform": {
+    "lpdm_device": "Intel(R) Arc(TM) A380 Graphics | Intel(R) oneAPI Unified Runtime over Level-Zero | GPU",
+    "cpu": "11th Gen Intel(R) Core(TM) i9-11900K @ 3.50GHz",
+    "omp_threads": 16,
+    "kernel": "7.2.9-1-default",
+    "compiler": "Intel(R) oneAPI DPC++/C++ Compiler 2026.1.1 (2026.1.1.20260724)",
+    "compile_flags": "-O3 -fsycl -qopenmp -march=rocketlake -std=c++20"
+  },
+  "evaluations_per_model": 2000,
+  "note_gpu_metric": "gpu_busy_pct_rc6_based = 100 - residencia RC6 (actividad del GT, no del motor Compute).",
+  "models": {
+    "M1": {
+      "wall_s": 13.186955,
+      "compatible_members": 439,
+      "internal_timers_s": {
+        "abm_s": 1.6287905,
+        "init_s": 0.040909455,
+        "h2d_s": 0.39889037,
+        "kernel_s": 8.478461,
+        "d2h_s": 0.65758034,
+        "reduce_s": 0.51969473,
+        "cost_s": 0.74759286,
+        "particles": 203424661,
+        "cpu_fallbacks": 0,
+        "capped": 1343,
+        "evaluations": 2006
+      },
+      "external_sampling": {
+        "wall_s": 20.516068797000116,
+        "samples": 41,
+        "cpu_util_pct_all_threads": {
+          "mean": 66.65052198177582,
+          "p95": 100.0,
+          "max": 100.0
+        },
+        "cpu_threads_above_80pct_mean": 1,
+        "cpu_threads": 16,
+        "cpu_per_thread_mean_pct": [
+          64.3223338115734,
+          64.58643945383031,
+          64.29172644667624,
+          64.34050693448111,
+          86.98991791838687,
+          66.2078159594044,
+          64.82062093129936,
+          64.40054445793326,
+          64.2439024390244,
+          64.2439024390244,
+          64.24581539933047,
+          64.3223338115734,
+          76.29459588713534,
+          64.3692749144686,
+          64.35750660489336,
+          64.37111429937828
+        ],
+        "gpu_busy_pct_rc6_based": {
+          "mean": 91.91746583857466,
+          "p95": 100.0,
+          "max": 100.0
+        },
+        "gpu_act_freq_mhz": {
+          "mean": 1773.1707317073171,
+          "p95": 2450,
+          "max": 2450
+        },
+        "gpu_power_w": {
+          "mean": 30.475088537842648,
+          "p95": 39.31039238157443,
+          "max": 39.91240065943106
+        }
+      }
+    },
+    "M0": {
+      "wall_s": 12.045076,
+      "compatible_members": 74,
+      "internal_timers_s": {
+        "abm_s": 1.5171047,
+        "init_s": 0.043024948,
+        "h2d_s": 0.3193513,
+        "kernel_s": 7.6942039,
+        "d2h_s": 0.47413125,
+        "reduce_s": 0.39079018,
+        "cost_s": 0.89487662,
+        "particles": 188150837,
+        "cpu_fallbacks": 0,
+        "capped": 1170,
+        "evaluations": 2006
+      },
+      "external_sampling": {
+        "wall_s": 19.51549110399992,
+        "samples": 39,
+        "cpu_util_pct_all_threads": {
+          "mean": 64.49884593876999,
+          "p95": 100.0,
+          "max": 100.0
+        },
+        "cpu_threads_above_80pct_mean": 1,
+        "cpu_threads": 16,
+        "cpu_per_thread_mean_pct": [
+          62.15485168426345,
+          61.902463549522366,
+          61.83991545336083,
+          61.854526425954994,
+          67.1955756661639,
+          64.21433030806011,
+          62.05639178748422,
+          62.05768461230646,
+          62.09653092006034,
+          62.05128205128205,
+          62.14990138067061,
+          61.800227783421064,
+          93.07060260001437,
+          64.00502765208647,
+          61.743589743589745,
+          61.78863340207878
+        ],
+        "gpu_busy_pct_rc6_based": {
+          "mean": 88.16227562268328,
+          "p95": 100.0,
+          "max": 100.0
+        },
+        "gpu_act_freq_mhz": {
+          "mean": 1943.5897435897436,
+          "p95": 2450,
+          "max": 2450
+        },
+        "gpu_power_w": {
+          "mean": 29.988606002388543,
+          "p95": 38.87819423426622,
+          "max": 39.3395311036876
+        }
+      }
+    },
+    "M3": {
+      "wall_s": 16.066024,
+      "compatible_members": 38,
+      "internal_timers_s": {
+        "abm_s": 1.7272189,
+        "init_s": 0.057293933,
+        "h2d_s": 0.30913341,
+        "kernel_s": 11.637461,
+        "d2h_s": 0.50970835,
+        "reduce_s": 0.42949244,
+        "cost_s": 0.64816406,
+        "particles": 300521177,
+        "cpu_fallbacks": 0,
+        "capped": 2304,
+        "evaluations": 2006
+      },
+      "external_sampling": {
+        "wall_s": 23.52070193899999,
+        "samples": 47,
+        "cpu_util_pct_all_threads": {
+          "mean": 70.41349578906849,
+          "p95": 100.0,
+          "max": 100.0
+        },
+        "cpu_threads_above_80pct_mean": 1,
+        "cpu_threads": 16,
+        "cpu_per_thread_mean_pct": [
+          68.39636280043932,
+          68.29703796412181,
+          68.41000229879187,
+          68.33156028368795,
+          88.74538751670882,
+          75.47017104714226,
+          68.7200667501043,
+          68.43804755944932,
+          68.29787234042553,
+          68.65164789319984,
+          68.39465999165624,
+          68.66332916145181,
+          68.32290362953692,
+          72.39498352532502,
+          68.49761181068172,
+          68.58428805237317
+        ],
+        "gpu_busy_pct_rc6_based": {
+          "mean": 90.59336002967297,
+          "p95": 100.0,
+          "max": 100.0
+        },
+        "gpu_act_freq_mhz": {
+          "mean": 2130.851063829787,
+          "p95": 2450,
+          "max": 2450
+        },
+        "gpu_power_w": {
+          "mean": 32.928550676995236,
+          "p95": 40.083236732340914,
+          "max": 40.63517181075828
+        }
+      }
+    }
+  }
+}

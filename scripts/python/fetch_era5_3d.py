@@ -3,7 +3,7 @@
 JORO-HPC  ·  scripts/python/fetch_era5_3d.py
 Descarga quirúrgica de tensores horarios de ERA5 vía CDS API.
 
-Fase 2 (Piloto Aéreo de 7 Días):
+Piloto Aéreo de 7 Días:
   - Descarga de 168 horas: 1 al 7 de mayo de 2014 (00:00 a 23:00 UTC).
   - Variables 3D (12 niveles 1000-700 hPa): u, v, w (omega), T.
   - Variables superficiales: sp, t2m, u10, v10, blh.
@@ -218,7 +218,7 @@ def fetch_era5(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Descarga ERA5 (Fase 2 Piloto 7 Días JORO-HPC)"
+        description="Descarga ERA5 (piloto aéreo de 7 días JORO-HPC)"
     )
     parser.add_argument(
         "--output-dir",

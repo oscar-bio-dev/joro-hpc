@@ -8,7 +8,7 @@
 #include <algorithm>
 #include <random>
 
-/// Prueba de recuperación de parámetros sintéticos (Sección 11 de JORO-HPC.tex).
+/// Prueba de recuperación de parámetros sintéticos (Sección 11 de JORO-HPC_Research_Proposal.tex).
 /// Genera observaciones sintéticas con un parámetro objetivo conocido (theta*)
 /// y ejecuta una búsqueda de optimización unidimensional para verificar
 /// que el mínimo de la función de costo recupera el valor verdadero.
@@ -90,7 +90,7 @@ int main() {
     JORO_TEST_ASSERT(cost_recovered < cost_initial, "La optimización no redujo el costo respecto al guess inicial");
     JORO_TEST_ASSERT(recovery_error < 0.30, "El optimizador no convergió al entorno del parámetro verdadero");
 
-    // ── Fase 4.5: reparametrización de K_i (Sección 8.4) y enlace de ocupación calibrable ──
+    // ── Reparametrización de K_i (Sección 8.4) y enlace de ocupación calibrable ──
     {
         using joro::abm::CarryingCapacityParams;
         using joro::abm::compute_carrying_capacity;

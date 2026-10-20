@@ -8,7 +8,7 @@
 
 namespace joro::lpdm {
 
-/// Modelo nulo isotrópico exponencial para la hipótesis H2 (Sección 6.2 de JORO-HPC.tex):
+/// Modelo nulo isotrópico exponencial para la hipótesis H2 (Sección 6.2 de JORO-HPC_Research_Proposal.tex):
 /// K_0(d | lambda) = (lambda / (2 * pi)) * exp(-lambda * d)
 /// Sirve como referencia base no mecanística frente a la dispersión eólica 3D (LPDM).
 class NullKernelDisperser {

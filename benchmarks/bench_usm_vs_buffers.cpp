@@ -8,7 +8,7 @@
 #endif
 
 /// Microbenchmark HPC: Tráfico PCIe y throughput de memoria en GPU Intel Arc A770
-/// Compara Unified Shared Memory (USM) vs Buffers explícitos (Sección 13.2 de JORO-HPC.tex).
+/// Compara Unified Shared Memory (USM) vs Buffers explícitos (Sección 13.2 de JORO-HPC_Research_Proposal.tex).
 int main() {
     std::cout << "[BENCHMARK] Perfilado de memoria: USM vs Buffers explícitos...\n";
 

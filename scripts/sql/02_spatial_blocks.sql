@@ -1,7 +1,7 @@
 --------------------------------------------------------------------------------
 -- JORO-HPC  ·  02_spatial_blocks.sql
 -- Partición de la malla 5x5 km en bloques espaciales para validación cruzada
--- según la Sección 12 del anteproyecto JORO-HPC.tex
+-- según la Sección 12 del anteproyecto JORO-HPC_Research_Proposal.tex
 --------------------------------------------------------------------------------
 
 -- Vista de partición para la fase de calibración (2014-2019)

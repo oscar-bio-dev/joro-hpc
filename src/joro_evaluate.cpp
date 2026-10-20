@@ -1,6 +1,6 @@
 ////////////////////////////////////////////////////////////////////////////////
-/// @file   phase5_main.cpp
-/// @brief  JORO-HPC — Validador Fuera de Muestra Fase 5 (2020–2024)
+/// @file   joro_evaluate.cpp
+/// @brief  JORO-HPC — Validador Fuera de Muestra (2020–2024)
 ///
 /// Ejecuta la validación ciega fuera de muestra para contrastar formalmente
 /// las Hipótesis H1 y H2 (Secciones 3, 4 y 12 del anteproyecto):
@@ -242,11 +242,11 @@ struct IsotropicKernelDisperser {
 } // namespace
 
 int main(int argc, char* argv[]) {
-    // 0. HABILITAR EL DESBLOQUEO DE FASE 5 (Mes 6)
-    setenv("JORO_UNLOCK_PHASE5", "1", 1);
+    // 0. HABILITAR EL DESBLOQUEO DE LA VENTANA DE EVALUACIÓN 2020–2024
+    setenv("JORO_UNLOCK_EVALUATION", "1", 1);
 
     std::cout << "╔═══════════════════════════════════════════════════════════════════════════════════════╗\n"
-              << "║  JORO-HPC — FASE 5: VALIDACIÓN CIEGA FUERA DE MUESTRA (2020–2024)                    ║\n"
+              << "║  JORO-HPC — VALIDACIÓN CIEGA FUERA DE MUESTRA (2020–2024)                            ║\n"
               << "║  Cero Reajuste (Zero Data Leakage) · Prueba Formal de Hipótesis H1 y H2              ║\n"
               << "║  Aceleración Híbrida: Intel Arc A380 (SYCL Device USM) + CPU OpenMP (AVX-512)        ║\n"
               << "╚═══════════════════════════════════════════════════════════════════════════════════════╝\n\n";
@@ -258,7 +258,7 @@ int main(int argc, char* argv[]) {
     if (const char* e = std::getenv("JORO_ERA5_DIR")) config.era5_dir = e;
 
     std::cout << "[Config] Directorio ERA5 activo: " << config.era5_dir << "\n";
-    std::cout << "[Config] Guard ERA5 desbloqueado para Fase 5: JORO_UNLOCK_PHASE5=1\n";
+    std::cout << "[Config] Guard ERA5 desbloqueado para la validación fuera de muestra: JORO_UNLOCK_EVALUATION=1\n";
 
     // 2. Conectar a PostGIS y cargar la malla de 256,020 celdas
     joro::io::PostgisClient db_client(config.db_host, config.db_port, config.db_name, config.db_user, config.db_password);
@@ -337,7 +337,7 @@ int main(int argc, char* argv[]) {
     std::cout << "✔ " << lpdm_gpu->atmosphere_count() << " campos meteorológicos anuales residentes en Device USM de la GPU.\n";
 
     // 6. Cargar conjuntos de parámetros congelados (Theta_comp M1 y M0)
-    std::cout << "\n▶ Cargando ensambles de parámetros 100% congelados de la Fase 4.5...\n";
+    std::cout << "\n▶ Cargando ensambles de parámetros 100% congelados de la calibración 2014–2019...\n";
     const std::string m1_csv = "/mnt/hpc_scratch/joro-hpc/checkpoints/theta_compatible_ensemble.csv";
     const std::string m0_csv = "/mnt/hpc_scratch/joro-hpc/checkpoints/theta_compatible_ensemble_M0.csv";
 
@@ -590,7 +590,7 @@ int main(int argc, char* argv[]) {
         }
     }
     std::cout << "✔ Parámetro óptimo del Kernel Isotrópico calibrado en 2014–2019: lambda* = "
-              << best_lambda_km << " km (congelado para la Fase 5)\n";
+              << best_lambda_km << " km (congelado para la validación 2020–2024)\n";
 
     // 8. EJECUCIÓN CONTINUA DE 11 AÑOS (2014–2024)
     std::cout << "\n===================================================================\n";
@@ -1052,7 +1052,7 @@ int main(int argc, char* argv[]) {
     std::cout << "└──────────────────────────────────────────────┴──────────────────────────┴────────────────────────┘\n";
 
     // Guardar resumen JSON de cinemática de frente
-    const std::string kin_json_path = "/mnt/hpc_scratch/joro-hpc/outputs/phase5_sim_kinematics.json";
+    const std::string kin_json_path = "/mnt/hpc_scratch/joro-hpc/outputs/validation_sim_kinematics.json";
     {
         std::ofstream kj(kin_json_path);
         kj << "{\n";
@@ -1081,7 +1081,7 @@ int main(int argc, char* argv[]) {
     }
 
     // Guardar resumen JSON de métricas
-    const std::string metrics_json_path = "/mnt/hpc_scratch/joro-hpc/outputs/phase5_validation_metrics.json";
+    const std::string metrics_json_path = "/mnt/hpc_scratch/joro-hpc/outputs/validation_metrics.json";
     std::ofstream mj(metrics_json_path);
     mj << "{\n"
        << "  \"m1_brier_global\": " << calc_brier_global(m1_map_out.p_marginal_eval, eval_rows) << ",\n"
@@ -1106,7 +1106,7 @@ int main(int argc, char* argv[]) {
 
     double total_wall = std::chrono::duration<double>(std::chrono::high_resolution_clock::now() - sim_start_all).count();
     std::cout << "\n===================================================================\n";
-    std::cout << "✔ FASE 5 COMPLETADA EXITOSAMENTE EN " << std::fixed << std::setprecision(2) << total_wall << " s ("
+    std::cout << "✔ VALIDACIÓN FUERA DE MUESTRA COMPLETADA EXITOSAMENTE EN " << std::fixed << std::setprecision(2) << total_wall << " s ("
               << (total_wall / 60.0) << " min)\n";
     std::cout << "===================================================================\n";
 

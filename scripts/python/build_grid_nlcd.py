@@ -147,7 +147,7 @@ if __name__ == "__main__":
         "--smoke-test",
         action="store_true",
         default=True,
-        help="Generar valores sintéticos dummy (0.5) para Fase 1 Smoke Test",
+        help="Generar valores sintéticos dummy (0.5) para Smoke Test",
     )
     parser.add_argument(
         "--cell-size",

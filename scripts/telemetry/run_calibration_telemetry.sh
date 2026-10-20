@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Lanza la calibración de Fase 4 con afinidad OpenMP fija y captura telemetría real de CPU y GPU.
-# Uso: scripts/telemetry/run_phase4_telemetry.sh [directorio_de_salida]
+# Lanza la calibración inversa con afinidad OpenMP fija y captura telemetría real de CPU y GPU.
+# Uso: scripts/telemetry/run_calibration_telemetry.sh [directorio_de_salida]
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-OUT="${1:-/mnt/hpc_scratch/joro-hpc/telemetry/phase4_$(date +%Y%m%d_%H%M%S)}"
+OUT="${1:-/mnt/hpc_scratch/joro-hpc/telemetry/calibration_$(date +%Y%m%d_%H%M%S)}"
 mkdir -p "$OUT"
 
 # shellcheck disable=SC1091
@@ -25,7 +25,7 @@ echo "[telemetría] salida en $OUT"
 SAMPLER=$!
 
 cd "$ROOT"
-stdbuf -oL ./build/joro_hpc --phase4 2>&1 | while IFS= read -r line; do
+stdbuf -oL ./build/joro_hpc --calibrate 2>&1 | while IFS= read -r line; do
     printf '%s %s\n' "$(date +%s.%N)" "$line"
 done | tee "$OUT/run.log" | sed -E 's/^[0-9.]+ //'
 

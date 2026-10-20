@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-JORO-HPC · scripts/python/build_phase4_report.py
-Genera docs/phase4_final_report.md a partir de los artefactos REALES de la corrida Fase 4.5:
-  checkpoints/phase4_summary_{M1,M0,M3}.json     (resumen de cada calibración, escrito por el binario)
+JORO-HPC · scripts/python/generate_calibration_report.py
+Genera docs/reports/03_Inverse_Calibration_2014_2019.md y docs/telemetry/calibration_hardware_profile.json
+a partir de los artefactos REALES de la calibración inversa 2014–2019:
+  checkpoints/calibration_summary_{M1,M0,M3}.json     (resumen de cada calibración, escrito por el binario)
   checkpoints/theta_compatible_ensemble{,_M0,_M3}.csv
   checkpoints/telemetry_{M1,M0,M3}.json          (sample_telemetry.py)
   PostGIS (grid_5km, cell_annual_observations)   y el inventario de /era5_nc_active
@@ -10,7 +11,7 @@ Genera docs/phase4_final_report.md a partir de los artefactos REALES de la corri
 Todos los veredictos (cumple / NO cumple) se calculan aquí con reglas fijas; nada se redacta a mano
 sobre resultados numéricos, para que el informe no pueda sobrestimar lo logrado.
 
-Uso:  .venv/bin/python scripts/python/build_phase4_report.py [--out docs/phase4_final_report.md]
+Uso:  .venv/bin/python scripts/python/generate_calibration_report.py [--out docs/reports/03_Inverse_Calibration_2014_2019.md]
 """
 from __future__ import annotations
 
@@ -65,7 +66,7 @@ def era5_inventory():
             else:
                 cells.append("✘ falta")
                 ok_all = False
-        role = "calibración (leído)" if y <= 2019 else "reservado Fase 5 (NO leído)"
+        role = "calibración (leído)" if y <= 2019 else "reservado para validación (NO leído)"
         lines.append(f"| {y} | {cells[0]} | {cells[1]} | {cells[2]} | {role} |")
     return "\n".join(lines), ok_all
 
@@ -104,7 +105,7 @@ def eval_set_scan():
         for p in (ROOT / base).rglob("*"):
             if p.suffix not in (".py", ".cpp", ".hpp", ".sql", ".sh"):
                 continue
-            if p.name == "build_phase4_report.py":
+            if p.name == "generate_calibration_report.py":
                 continue
             for i, line in enumerate(p.read_text(errors="ignore").splitlines(), 1):
                 if re.search(r"(FROM|JOIN)\s+v_evaluation_set", line, re.I):
@@ -135,26 +136,71 @@ def md_corr(C, names):
     return h
 
 
+def write_hardware_profile(path: Path, S: dict, T: dict) -> None:
+    """Consolida en un único JSON la telemetría interna (temporizadores del binario) y externa (sysfs/fdinfo)."""
+    import platform
+    import subprocess
+    cpu = "desconocido"
+    try:
+        for line in Path("/proc/cpuinfo").read_text().splitlines():
+            if line.startswith("model name"):
+                cpu = line.split(":", 1)[1].strip()
+                break
+    except OSError:
+        pass
+    try:
+        compiler = subprocess.check_output(["icpx", "--version"], text=True, stderr=subprocess.STDOUT).splitlines()[0]
+    except (OSError, subprocess.CalledProcessError):
+        compiler = "icpx (versión no disponible en este entorno)"
+    main = S["M1"]
+    prof = {
+        "schema": "joro-hpc/calibration_hardware_profile/v1",
+        "generated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "platform": {
+            "lpdm_device": main["device"],
+            "cpu": cpu,
+            "omp_threads": main["omp_threads"],
+            "kernel": platform.release(),
+            "compiler": compiler,
+            "compile_flags": "-O3 -fsycl -qopenmp -march=rocketlake -std=c++20",
+        },
+        "evaluations_per_model": main["total_evaluations"],
+        "note_gpu_metric": "gpu_busy_pct_rc6_based = 100 - residencia RC6 (actividad del GT, no del motor Compute).",
+        "models": {
+            m: {
+                "wall_s": S[m]["runtime_s"],
+                "compatible_members": S[m]["compatible_members"],
+                "internal_timers_s": S[m]["telemetry"],
+                "external_sampling": T.get(m),
+            }
+            for m in MODELS if S.get(m)
+        },
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(prof, indent=2, ensure_ascii=False) + "\n")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--out", default=str(ROOT / "docs" / "phase4_final_report.md"))
+    ap.add_argument("--out", default=str(ROOT / "docs" / "reports" / "03_Inverse_Calibration_2014_2019.md"))
+    ap.add_argument("--telemetry-out", default=str(ROOT / "docs" / "telemetry" / "calibration_hardware_profile.json"))
     args = ap.parse_args()
 
-    S = {m: load_json(CK / f"phase4_summary_{m}.json") for m in MODELS}
+    S = {m: load_json(CK / f"calibration_summary_{m}.json") for m in MODELS}
     T = {m: load_json(CK / f"telemetry_{m}.json") for m in MODELS}
     main_s = S["M1"]
     if main_s is None:
-        raise SystemExit("Falta phase4_summary_M1.json: ejecute la calibración primero")
+        raise SystemExit("Falta calibration_summary_M1.json: ejecute la calibración primero")
     db = db_stats()
     inv_md, inv_ok = era5_inventory()
     eval_hits = eval_set_scan()
     L: list[str] = []
     A = L.append
 
-    A("# JORO-HPC — Informe final Fase 4.5: cierre de datos interanuales y reparametrización de identificabilidad\n")
-    A(f"_Generado automáticamente el {datetime.now():%Y-%m-%d %H:%M} por `scripts/python/build_phase4_report.py` "
+    A("# JORO-HPC — Calibración inversa 2014–2019: datos, identificabilidad y ensamble de parámetros compatibles (Θ_comp)\n")
+    A(f"_Generado automáticamente el {datetime.now():%Y-%m-%d %H:%M} por `scripts/python/generate_calibration_report.py` "
       "a partir de los artefactos de la corrida. Los veredictos se calculan con reglas fijas._\n")
-    A(f"- Dispositivo LPDM: **{main_s['device']}** (pruebas); la corrida de producción final será en la Arc A770.")
+    A(f"- Dispositivo LPDM: **{main_s['device']}**.")
     A(f"- Hilos OpenMP: **{main_s['omp_threads']}**. Evaluaciones por modelo: **{main_s['total_evaluations']}** (5 cadenas × 400).\n")
 
     # ───────────── 1. Datos
@@ -188,7 +234,7 @@ def main() -> int:
     A("| Año | Celdas | Σ effort_araneae | máx | celdas con effort>0 | valores distintos | presencias *T. clavata* |\n|---|---|---|---|---|---|---|")
     for y, c, s, mx, pos, dist, pres in db["effort"]:
         A(f"| {y} | {c:,} | {int(s or 0):,} | {mx} | {pos:,} | {dist:,} | {pres or 0} |")
-    A("| 2020–2024 | — | reservado para la Fase 5: el informe no consulta estos años | | | | |")
+    A("| 2020–2024 | — | reservado para la validación fuera de muestra: este informe no consulta estos años | | | | |")
     A("")
     A("- Método: conteo de registros georreferenciados (`hasCoordinate`, sin problemas geoespaciales) asignados a la celda "
       "por punto en la celda EPSG:5070; `effort = GREATEST(conteo, joro_count)`. Respaldo previo: "
@@ -201,7 +247,7 @@ def main() -> int:
     t = main_s["telemetry"]
     wall = main_s["runtime_s"]
     h2d = t["h2d_s"] + t["d2h_s"]
-    A("| Métrica | Fase 4.5 (M1) | Línea base (commit `3fa0d37`) |\n|---|---|---|")
+    A("| Métrica | Calibración actual (M1) | Línea base (commit `3fa0d37`) |\n|---|---|---|")
     A(f"| Tiempo total (2,000 evaluaciones) | **{wall:.1f} s** | {BASE['runtime_s']} s |")
     A(f"| H2D + D2H | **{h2d:.2f} s** ({100 * h2d / wall:.1f} % de pared) | {BASE['h2d_d2h_s']} s |")
     A(f"| Kernel SYCL en GPU | {t['kernel_s']:.2f} s ({100 * t['kernel_s'] / wall:.1f} % de pared) | — |")
@@ -242,7 +288,7 @@ def main() -> int:
     A(f"\n**MAP (mejor global):** J = {mc['j_total']:.4f}; J̃_llegada = **{mc['j_arrival_norm']:.4f}**, "
       f"J̃_frente = **{mc['j_front_norm']:.4f}**, J̃_persistencia = **{mc['j_persistence_norm']:.4f}**.\n")
     all_lt1 = all(mc[k] < 1.0 for k in ("j_arrival_norm", "j_front_norm", "j_persistence_norm"))
-    A(f"- Criterio de la tarea 3 (los tres componentes por debajo de 1.00 simultáneamente en el MAP): "
+    A(f"- Criterio de convergencia (los tres componentes por debajo de 1.00 simultáneamente en el MAP): "
       f"**{'✔ CUMPLE' if all_lt1 else '✘ NO CUMPLE'}**.")
     A(f"- Línea base previa: J̃_llegada {BASE['j_arrival']}, J̃_persistencia {BASE['j_persist']}.\n")
     st = main_s["stratification"]
@@ -365,10 +411,10 @@ def main() -> int:
     A("- El motor de PostgreSQL no registra lecturas de vistas sin `pg_stat_statements`; la afirmación «0 lecturas» se apoya en las "
       "tres comprobaciones anteriores (código, CSV exportado y guardia del lector), no en un contador del servidor.")
     zero = (max(yrs) <= 2019) and (not main_s["era5_blocked_year_requests"]) and len(eval_hits) == 0
-    A(f"- **Veredicto:** {'✔ 0 lecturas verificables; lista para desbloquear la Fase 5' if zero else '✘ revisar'}.\n")
+    A(f"- **Veredicto:** {'✔ 0 lecturas verificables; lista para desbloquear la validación fuera de muestra' if zero else '✘ revisar'}.\n")
 
     # ───────────── 7. Resumen
-    A("## 7. Resumen de criterios de la Fase 4.5\n")
+    A("## 7. Resumen de criterios de aceptación\n")
     crit = [
         ("ERA5 2014–2024 en disco, solo 2014–2019 leído", verd_era5),
         ("Censo real y conteo exacto GBIF en `grid_5km`/`cell_annual_observations`", bool(db["pop_cols"]) and not db["calib_view"][2] == 0),
@@ -381,10 +427,13 @@ def main() -> int:
     A("| Criterio | Estado |\n|---|---|")
     for name, ok in crit:
         A(f"| {name} | {'ver nota' if ok is None else ('✔' if ok else '✘')} |")
-    A("\n_`ctest` se verifica por separado (ver mensaje de commit)._\n")
+    A("\n_`ctest` (4/4) se verifica por separado; ver `docs/RUNBOOK.md`._\n")
 
+    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     Path(args.out).write_text("\n".join(L) + "\n")
     print(f"Informe escrito en {args.out}")
+    write_hardware_profile(Path(args.telemetry_out), S, T)
+    print(f"Perfil de hardware escrito en {args.telemetry_out}")
     return 0
 
 

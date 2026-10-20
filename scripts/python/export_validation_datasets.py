@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-JORO-HPC  ·  scripts/python/export_phase5_datasets.py
+JORO-HPC  ·  scripts/python/export_validation_datasets.py
 Exporta v_calibration_set (2014-2019) y v_evaluation_set (2020-2024)
-hacia /mnt/hpc_scratch/joro-hpc/ para la Fase 5.
+hacia /mnt/hpc_scratch/joro-hpc/ para la validación fuera de muestra.
 Incluye ecoregion_block y todas las covariables necesarias.
 """
 import sys

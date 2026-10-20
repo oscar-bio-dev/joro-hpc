@@ -6,7 +6,7 @@
 #include <random>
 
 /// Prueba numérica de convergencia débil del esquema estocástico de Euler-Maruyama
-/// según Kloeden & Platen (1992) y Sección 7.6 de JORO-HPC.tex.
+/// según Kloeden & Platen (1992) y Sección 7.6 de JORO-HPC_Research_Proposal.tex.
 ///
 /// Evalúa el momento estocástico E[w'^2(T)] frente al paso temporal dt
 /// incorporando el incremento de Wiener dW ~ N(0, dt) sobre múltiples realizaciones Monte Carlo.

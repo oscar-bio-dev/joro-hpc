@@ -5,7 +5,7 @@ Descarga e ingesta de ocurrencias de Trichonephila clavata (GBIF / iNaturalist)
 y cuantificación del esfuerzo Target-Group Background (Araneae) sobre la malla grid_5km.
 
 Sincronizado con:
-  - Secciones 6, 9 y 13 de JORO-HPC.tex
+  - Secciones 6, 9 y 13 de JORO-HPC_Research_Proposal.tex
   - PostGIS: occurrences_raw, cell_annual_observations
   - Vistas: v_calibration_set (2014-2019) y v_evaluation_set (2020-2024)
 """
@@ -320,8 +320,8 @@ def ingest_observations(
     logger.info("  Filas totales: %d | Celdas ocupadas con Joro: %d | Celdas distintas evaluadas: %d",
                 cal_total, cal_detected, cal_cells)
 
-    # Fase 4.5: v_evaluation_set (2020-2024) NO se consulta aquí (ni siquiera agregados de presencias):
-    # permanece bloqueada hasta la Fase 5. Solo se verifica que la vista exista en el catálogo.
+    # Congelamiento: v_evaluation_set (2020-2024) NO se consulta aquí (ni siquiera agregados de presencias):
+    # permanece bloqueada hasta la validación fuera de muestra. Solo se verifica que la vista exista en el catálogo.
     cur.execute("SELECT to_regclass('public.v_evaluation_set') IS NOT NULL;")
     logger.info("=== Vista v_evaluation_set (2020-2024): existe=%s, BLOQUEADA PARA FASE 5 (sin lecturas) ===",
                 cur.fetchone()[0])

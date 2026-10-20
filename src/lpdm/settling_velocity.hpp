@@ -6,7 +6,7 @@
 namespace joro::lpdm {
 
 /// Calcula la velocidad terminal de sedimentación v_s [m/s] de un juvenil con seda
-/// de acuerdo con la Sección 7.3 de JORO-HPC.tex (Humphrey 1987, Suter 1992).
+/// de acuerdo con la Sección 7.3 de JORO-HPC_Research_Proposal.tex (Humphrey 1987, Suter 1992).
 ///
 /// v_s = h(M, L_s, n_s, rho_air, mu_air, chi)
 ///

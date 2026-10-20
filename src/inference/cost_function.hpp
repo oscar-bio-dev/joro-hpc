@@ -32,7 +32,7 @@ struct CostComponents {
     double j_persistence_norm = 0.0;
 };
 
-/// Evalúa la función de costo multicriterio normalizada (Secciones 9 y 11 de JORO-HPC.tex):
+/// Evalúa la función de costo multicriterio normalizada (Secciones 9 y 11 de JORO-HPC_Research_Proposal.tex):
 /// J(theta) = w1 * J_tilde_llegada + w2 * J_tilde_frente + w3 * J_tilde_persistencia
 [[nodiscard]] inline CostComponents evaluate_multicriteria_cost(
     const std::vector<float>& predicted_p_marginal,

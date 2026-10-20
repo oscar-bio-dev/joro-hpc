@@ -27,10 +27,12 @@ float Era5NetCdfReader::omega_to_w(float omega, float pressure_pa, float temp_k)
 
 bool Era5NetCdfReader::year_allowed(int year) {
     if (year <= kLastCalibrationYear) return true;
-    const char* unlock = std::getenv("JORO_UNLOCK_PHASE5");
+    // JORO_UNLOCK_EVALUATION es el nombre de producción; JORO_UNLOCK_PHASE5 se mantiene como alias heredado.
+    const char* unlock = std::getenv("JORO_UNLOCK_EVALUATION");
+    if (unlock == nullptr) unlock = std::getenv("JORO_UNLOCK_PHASE5");
     if (unlock != nullptr && std::string(unlock) == "1") return true;
     blocked_years_.push_back(year);
-    std::cerr << "[ERA5] BLOQUEADO: el año " << year << " pertenece a la ventana 2020-2024 reservada para la Fase 5 "
+    std::cerr << "[ERA5] BLOQUEADO: el año " << year << " pertenece a la ventana 2020-2024 reservada para la validación fuera de muestra "
               << "(no se carga en memoria).\n";
     return false;
 }

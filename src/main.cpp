@@ -157,7 +157,7 @@ void execute_latitudinal_transect_experiment(
     const joro::SimulationConfig& config)
 {
     std::cout << "\n╔═══════════════════════════════════════════════════════════════════════════════════════════════╗\n";
-    std::cout << "║    FASE 3: EXPERIMENTO DE GRADIENTE LATITUDINAL Y SATURACIÓN DEMOGRÁFICA (2014–2019)           ║\n";
+    std::cout << "║    EXPERIMENTO DE GRADIENTE LATITUDINAL Y SATURACIÓN DEMOGRÁFICA (2014–2019)                   ║\n";
     std::cout << "╚═══════════════════════════════════════════════════════════════════════════════════════════════╝\n";
 
     joro::abm::AbmEngine abm_engine;
@@ -267,11 +267,13 @@ void execute_latitudinal_transect_experiment(
     // ─────────────────────────────────────────────────────────────────────────
     // TABLA 2: GRADIENTE LATITUDINAL SUR-NORTE (30°N A 44°N)
     // ─────────────────────────────────────────────────────────────────────────
-    std::cout << "\nTABLA 2: TRANSECTO LATITUDINAL SUR-NORTE (RESPUESTA TÉRMICA Y PERSISTENCIA BIOLÓGICA):\n";
+    std::cout << "\nTABLA 2: TRANSECTO LATITUDINAL SUR-NORTE — ESCENARIO DE REFERENCIA PRESCRITO (valores fijos del código, NO es salida de simulación):\n";
     std::cout << "┌─────────┬──────────────────────────────┬──────────────┬──────────────┬──────────────┬──────────────┬─────────────────────┐\n";
     std::cout << "│ Latitud │ Zona Geográfica Testigo      │ Tmin Med Inv │ Tmin Extrema │ Daño D_jt    │ Superv. Oot. │ Persistencia 2 Años │\n";
     std::cout << "├─────────┼──────────────────────────────┼──────────────┼──────────────┼──────────────┼──────────────┼─────────────────────┤\n";
 
+    // AVISO: esta tabla es un escenario de referencia con valores fijos; no se calcula con el ABM ni con ERA5.
+    // No debe citarse como resultado. Ver docs/RUNBOOK.md (sección "Problemas conocidos").
     struct LatPoint {
         float lat;
         std::string name;
@@ -305,7 +307,7 @@ void execute_latitudinal_transect_experiment(
     std::cout << "└─────────┴──────────────────────────────┴──────────────┴──────────────┴──────────────┴──────────────┴─────────────────────┘\n";
 }
 
-/// Resumen JSON de una calibración (insumo de scripts/python/build_phase4_report.py)
+/// Resumen JSON de una calibración (insumo de scripts/python/generate_calibration_report.py)
 static void write_calibration_summary_json(const std::string& path,
                                            const joro::inference::SimulatedAnnealingReport& r,
                                            bool era5_strict, const std::string& era5_dir,
@@ -376,31 +378,33 @@ static void write_calibration_summary_json(const std::string& path,
 int main(int argc, char* argv[]) {
     std::cout << "╔═══════════════════════════════════════════════════════════╗\n"
               << "║  JORO-HPC v0.4.0 — Mechanistic LPDM-ABM Simulator         ║\n"
-              << "║  Phase 4: GBIF/TGB Ingestion & Multi-Start SA Calibration ║\n"
+              << "║  GBIF/TGB Ingestion & Multi-Start SA Calibration          ║\n"
               << "║  Species: Trichonephila clavata | Platform: oneAPI / SYCL ║\n"
               << "╚═══════════════════════════════════════════════════════════╝\n\n";
 
     std::string target_engine = "gpu";
-    bool run_phase3_transect = false;
-    bool run_phase3_morris = false;
-    bool run_phase4_calibration = true;
-    bool phase4_only = false; // --phase4: solo calibración (omite los ciclos continentales de humo de Fase 1/2)
+    bool run_transect = false;
+    bool run_morris = false;
+    bool run_calibration = true;
+    bool calibration_only = false; // --calibrate: solo calibración inversa (omite los ciclos continentales de humo)
     // Modelos de capacidad de carga (Sección 8.4): --model M1 (principal) | M0 | M3 | all (M1 + M0 + M3)
     std::vector<joro::abm::CarryingModel> models = {joro::abm::CarryingModel::M1};
 
+    // Banderas CLI de producción: --calibrate, --transect, --morris, --diagnostics (= --transect --morris).
+    // Alias heredados (compatibilidad hacia atrás): --phase4 == --calibrate ; --phase3 == --diagnostics.
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "--engine" && i + 1 < argc) target_engine = argv[++i];
         else if (arg == "--engine=cpu") target_engine = "cpu";
         else if (arg == "--engine=gpu") target_engine = "gpu";
         else if (arg == "--engine=both") target_engine = "both";
-        else if (arg == "--no-transect") run_phase3_transect = false;
-        else if (arg == "--no-morris") run_phase3_morris = false;
-        else if (arg == "--transect") run_phase3_transect = true;
-        else if (arg == "--morris") run_phase3_morris = true;
-        else if (arg == "--phase3") { run_phase3_transect = true; run_phase3_morris = true; run_phase4_calibration = false; }
-        else if (arg == "--phase4") { run_phase3_transect = false; run_phase3_morris = false; run_phase4_calibration = true; phase4_only = true; }
-        else if (arg == "--no-calibration") run_phase4_calibration = false;
+        else if (arg == "--no-transect") run_transect = false;
+        else if (arg == "--no-morris") run_morris = false;
+        else if (arg == "--transect") run_transect = true;
+        else if (arg == "--morris") run_morris = true;
+        else if (arg == "--diagnostics" || arg == "--phase3") { run_transect = true; run_morris = true; run_calibration = false; }
+        else if (arg == "--calibrate" || arg == "--phase4") { run_transect = false; run_morris = false; run_calibration = true; calibration_only = true; }
+        else if (arg == "--no-calibration") run_calibration = false;
         else if (arg == "--model" && i + 1 < argc) {
             const std::string m = argv[++i];
             if (m == "M0") models = {joro::abm::CarryingModel::M0};
@@ -439,9 +443,9 @@ int main(int argc, char* argv[]) {
 
     // 3. Inicializar lector de tensores ERA5 (NetCDF4)
     joro::io::Era5NetCdfReader era5_reader(config.era5_dir);
-    // Fase 4.5: la calibración exige ERA5 REAL por año (sin respaldo sintético ni reciclaje de 2014)
+    // La calibración exige ERA5 REAL por año (sin respaldo sintético ni reciclaje de 2014)
     // (JORO_ERA5_NONSTRICT=1 solo para depurar el flujo; el resumen JSON registra `era5_strict` y el informe lo marca.)
-    const bool era5_strict = phase4_only && std::getenv("JORO_ERA5_NONSTRICT") == nullptr;
+    const bool era5_strict = calibration_only && std::getenv("JORO_ERA5_NONSTRICT") == nullptr;
     if (era5_strict) era5_reader.set_strict(true);
     joro::io::AtmosphericField3D atmosphere;
     era5_reader.load_month(2014, 5, atmosphere);
@@ -473,24 +477,24 @@ int main(int argc, char* argv[]) {
     RunSummary cpu_summary;
     RunSummary gpu_summary;
 
-    if (!phase4_only && (target_engine == "cpu" || target_engine == "both")) {
+    if (!calibration_only && (target_engine == "cpu" || target_engine == "both")) {
         cpu_summary = execute_continental_cycle("CPU Baseline (OpenMP AVX-512)", lpdm_cpu.get(),
                                                 grid_cells, atmosphere, winter_temps, summer_temps, config);
     }
 
-    if (!phase4_only && (target_engine == "gpu" || target_engine == "both")) {
+    if (!calibration_only && (target_engine == "gpu" || target_engine == "both")) {
         gpu_summary = execute_continental_cycle("Intel Arc A380 (SYCL Device USM)", lpdm_gpu.get(),
                                                 grid_cells, atmosphere, winter_temps, summer_temps, config);
     }
 
     // 6. Ejecutar Experimento de Gradiente Latitudinal (Tarea 3)
-    if (run_phase3_transect) {
+    if (run_transect) {
         auto active_engine = (target_engine == "cpu") ? lpdm_cpu.get() : lpdm_gpu.get();
         execute_latitudinal_transect_experiment(grid_cells, daily_thermal, atmosphere, active_engine, config);
     }
 
     // 7. Ejecutar Cribado de Sensibilidad de Morris (Tarea 4)
-    if (run_phase3_morris) {
+    if (run_morris) {
         auto active_engine = (target_engine == "cpu") ? lpdm_cpu.get() : lpdm_gpu.get();
         auto morris_report = joro::inference::run_morris_screening(grid_cells, daily_thermal, active_engine, 10, 4);
 
@@ -514,17 +518,17 @@ int main(int argc, char* argv[]) {
         std::cout << "└──────────────┴─────────┴──────────────────────┴──────────────┴──────────────┴──────────────┴──────────────┴─────────────────────────┘\n";
     }
 
-    // 8. Fase 4: Recocido Simulado Multi-inicio (Simulated Annealing 2014-2019)
-    if (run_phase4_calibration) {
+    // 8. Calibración inversa: Recocido Simulado Multi-inicio (Simulated Annealing 2014-2019)
+    if (run_calibration) {
         std::cout << "\n===================================================================\n";
-        std::cout << "▶ FASE 4: INGESTA OBSERVACIONAL Y CALIBRACIÓN INVERSA MULTI-INICIO\n";
+        std::cout << "▶ INGESTA OBSERVACIONAL Y CALIBRACIÓN INVERSA MULTI-INICIO\n";
         std::cout << "===================================================================\n";
 
         std::string obs_csv = "/mnt/hpc_scratch/joro-hpc/calibration_set_2014_2019.csv";
         auto observations = joro::inference::load_calibration_dataset(obs_csv);
 
         if (observations.empty()) {
-            std::cerr << "[Fase 4] Error: Dataset observacional vacío en " << obs_csv << "\n";
+            std::cerr << "[Calibración] Error: Dataset observacional vacío en " << obs_csv << "\n";
             return EXIT_FAILURE;
         }
 
@@ -532,7 +536,7 @@ int main(int argc, char* argv[]) {
         std::vector<joro::io::DailyThermalGrid> thermal_by_year(6);
         for (int yi = 0; yi < 6; ++yi) {
             if (!era5_reader.load_daily_thermal_year(2014 + yi, thermal_by_year[yi]) || !thermal_by_year[yi].has_data()) {
-                std::cerr << "[Fase 4] Error: no se pudo cargar la serie térmica diaria de " << (2014 + yi) << "\n";
+                std::cerr << "[Calibración] Error: no se pudo cargar la serie térmica diaria de " << (2014 + yi) << "\n";
                 return EXIT_FAILURE;
             }
         }
@@ -544,7 +548,7 @@ int main(int argc, char* argv[]) {
         for (int yi = 0; yi < 6; ++yi) {
             joro::io::AtmosphericField3D field_y;
             if (!era5_reader.load_month(2014 + yi, 5, field_y) || !lpdm_gpu->add_atmosphere(field_y)) {
-                std::cerr << "[Fase 4] Error: ERA5 3D/superficial de " << (2014 + yi) << " no utilizable para el LPDM.\n";
+                std::cerr << "[Calibración] Error: ERA5 3D/superficial de " << (2014 + yi) << " no utilizable para el LPDM.\n";
                 return EXIT_FAILURE;
             }
         }
@@ -568,12 +572,12 @@ int main(int argc, char* argv[]) {
                 grid_cells, thermal_by_year, observations, lpdm_gpu.get(), sa_chains, sa_iters, 1.0, 0.05,
                 ckpt, cal_model);
         } catch (const std::exception& e) {
-            std::cerr << "[Fase 4] ERROR: " << e.what() << "\n";
+            std::cerr << "[Calibración] ERROR: " << e.what() << "\n";
             return EXIT_FAILURE;
         }
 
         write_calibration_summary_json(
-            std::string("/mnt/hpc_scratch/joro-hpc/checkpoints/phase4_summary_") +
+            std::string("/mnt/hpc_scratch/joro-hpc/checkpoints/calibration_summary_") +
                 joro::abm::carrying_model_name(cal_model) + ".json",
             sa_report, era5_strict, config.era5_dir, era5_reader.files_read(), era5_reader.blocked_year_requests());
         if (!main_model) {
@@ -727,6 +731,6 @@ int main(int argc, char* argv[]) {
         } // fin del bucle de modelos K_i
     }
 
-    std::cout << "\n✔ Fase 4 completada exitosamente.\n";
+    std::cout << "\n✔ Calibración completada exitosamente.\n";
     return EXIT_SUCCESS;
 }

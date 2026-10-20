@@ -16,6 +16,7 @@ data/
 *.exe
 *.out
 joro_hpc
+joro_evaluate
 
 # ── Datos científicos grandes (NetCDF, HDF5) ────────────────────────────────
 *.nc
@@ -59,6 +60,15 @@ CMakeCache.txt
 CMakeFiles/
 cmake_install.cmake
 Makefile
+
+# ── LaTeX (artefactos intermedios; el PDF final sí se versiona) ─────────────
+*.aux
+*.toc
+*.synctex.gz
+*.fdb_latexmk
+*.fls
+*.bbl
+*.blg
 
 # ── Intel oneAPI temporales ──────────────────────────────────────────────────
 *.ipo

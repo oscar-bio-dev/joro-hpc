@@ -226,7 +226,7 @@ MorrisScreeningReport run_morris_screening(
 
         // Clasificación ecofisiológica
         if (res.mu_star_pop > 50000.0 || res.mu_star_front > 15.0) {
-            res.classification = "Dominante (Fase 4)";
+            res.classification = "Dominante";
         } else if (res.sigma_pop > 20000.0 || res.sigma_front > 8.0) {
             res.classification = "Interacción Fuerte";
         } else {

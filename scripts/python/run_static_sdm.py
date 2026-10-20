@@ -11,6 +11,7 @@ Covariables:
   - pop_density_h, road_density_r (Censo / TIGER)
   - log1p(effort_araneae) (Esfuerzo TGB)
 """
+import json
 import time
 import netCDF4 as nc
 import numpy as np
@@ -20,6 +21,7 @@ from sklearn.linear_model import LogisticRegression
 CALIB_CSV = "/mnt/hpc_scratch/joro-hpc/calibration_set_2014_2019.csv"
 EVAL_CSV = "/mnt/hpc_scratch/joro-hpc/evaluation_set_2020_2024.csv"
 OUT_CSV = "/mnt/hpc_scratch/joro-hpc/outputs/sdm_predictions_2020_2024.csv"
+OUT_COEF_JSON = "/mnt/hpc_scratch/joro-hpc/outputs/sdm_coefficients.json"
 ERA5_DIR = "/mnt/hpc_scratch/joro-hpc/era5_nc_active"
 
 def load_thermal_climatology(year):
@@ -79,6 +81,15 @@ def main():
     print(f"  Intercepto: {clf.intercept_[0]:.4f}")
     for f, c in zip(features, clf.coef_[0]):
         print(f"  {f:15s}: {c:+.4f}")
+
+    with open(OUT_COEF_JSON, "w") as fh:
+        json.dump({
+            "features": features,
+            "intercept": float(clf.intercept_[0]),
+            "coefficients": {f: float(c) for f, c in zip(features, clf.coef_[0])},
+            "n_train_rows": int(len(X_train)),
+            "n_train_presences": int(y_train.sum()),
+        }, fh, indent=2)
 
     train_probs = clf.predict_proba(X_train)[:, 1]
     print(f"  Media predicha entrenamiento: {train_probs.mean():.6f} (Obs: {y_train.mean():.6f})")

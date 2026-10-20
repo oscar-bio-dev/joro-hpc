@@ -7,7 +7,7 @@
 
 namespace joro::inference {
 
-/// Modelo dinámico de ocupación latente y detección imperfecta (Sección 9 de JORO-HPC.tex)
+/// Modelo dinámico de ocupación latente y detección imperfecta (Sección 9 de JORO-HPC_Research_Proposal.tex)
 struct OccupancyParameters {
     // Parámetros de colonización gamma: logit(gamma) = a0 + a1*log(1 + A) + a2*H
     float a0 = -4.0f;
@@ -77,7 +77,7 @@ struct OccupancyParameters {
     return sigmoid(logit_val);
 }
 
-/// Actualiza la probabilidad latente de ocupación psi_{i,t} (Sección 9 de JORO-HPC.tex):
+/// Actualiza la probabilidad latente de ocupación psi_{i,t} (Sección 9 de JORO-HPC_Research_Proposal.tex):
 /// psi_{i,t} = (1 - psi_{i,t-1}) * gamma_{i,t} + psi_{i,t-1} * phi_{i,t}
 [[nodiscard]] inline float update_dynamic_occupancy(
     float psi_prev,

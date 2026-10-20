@@ -5,7 +5,7 @@
 
 namespace joro::lpdm {
 
-/// Coeficientes de la ecuación estocástica de Langevin vertical (Sección 7.2 de JORO-HPC.tex):
+/// Coeficientes de la ecuación estocástica de Langevin vertical (Sección 7.2 de JORO-HPC_Research_Proposal.tex):
 /// dw' = a_w(w', z) dt + b_w(z) dW
 ///
 /// Implementa la solución de Thomson (1987) para turbulencia gaussiana no homogénea,

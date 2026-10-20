@@ -1,5 +1,5 @@
 # ==============================================================================
-# JORO-HPC — Configuración Maestra del MVP (Sección 6 y 13.2 de JORO-HPC.tex)
+# JORO-HPC — Configuración Maestra del MVP (Sección 6 y 13.2 de JORO-HPC_Research_Proposal.tex)
 # Simulador Mecanístico LPDM-ABM para Trichonephila clavata
 # Arquitectura Actualizada: Data Lake Permanente + Scratch NVMe + PostgreSQL (Port 5433)
 # ==============================================================================

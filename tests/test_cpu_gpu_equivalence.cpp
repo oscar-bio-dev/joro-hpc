@@ -4,7 +4,7 @@
 #include <vector>
 #include <cmath>
 
-/// Prueba de equivalencia estadística CPU vs GPU (Sección 7.6 de JORO-HPC.tex).
+/// Prueba de equivalencia estadística CPU vs GPU (Sección 7.6 de JORO-HPC_Research_Proposal.tex).
 /// Verifica que las distribuciones de llegada del kernel SYCL y del baseline OpenMP
 /// no presentan sesgos estructurales divergentes.
 int main() {

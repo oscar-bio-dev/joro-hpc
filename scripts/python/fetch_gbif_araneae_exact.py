@@ -231,7 +231,7 @@ def main() -> int:
     o.set_defaults(fn=cmd_fetch_opendata)
     i = sub.add_parser("ingest")
     i.add_argument("--years", type=int, nargs="+", default=YEARS,
-                   help="años a escribir (2014-2019 para calibración; 2020-2024 solo se prepara para la Fase 5)")
+                   help="años a escribir (2014-2019 para calibración; 2020-2024 solo se prepara para la validación fuera de muestra)")
     i.set_defaults(fn=cmd_ingest)
     args = ap.parse_args()
     return args.fn(args)

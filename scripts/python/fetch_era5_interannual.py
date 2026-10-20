@@ -10,7 +10,7 @@ Por año Y se generan en /mnt/hpc_scratch/joro-hpc/era5_nc_active/:
                         agregando la t2m horaria anual de 'reanalysis-era5-single-levels' por día UTC (media y mínimo)
 
 Regla de aislamiento: los archivos 2020-2024 se descargan y quedan en disco, pero el simulador
-de Fase 4.5 solo carga 2014-2019 (el lector C++ lanza error si se le pide un año > 2019).
+de calibración solo carga 2014-2019 (el lector C++ lanza error si se le pide un año > 2019).
 
 Uso:
   .venv/bin/python scripts/python/fetch_era5_interannual.py --years 2014 2015 ... --workers 4

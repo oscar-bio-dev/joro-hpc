@@ -68,7 +68,7 @@ CREATE TRIGGER trg_sync_grid_wgs84
 -- ─────────────────────────────────────────────────────────────────────────────
 -- 3. Tabla: cell_annual_observations
 --    Matriz anual de ocupación y esfuerzo observacional Target-Group Background
---    (Araneae) según Secciones 9.2 y 13.1 de JORO-HPC.tex.
+--    (Araneae) según Secciones 9.2 y 13.1 de JORO-HPC_Research_Proposal.tex.
 -- ─────────────────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS cell_annual_observations (
     cell_id         INTEGER         REFERENCES grid_5km(cell_id) ON DELETE CASCADE,

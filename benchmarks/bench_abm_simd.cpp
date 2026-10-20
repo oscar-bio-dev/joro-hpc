@@ -8,7 +8,7 @@
 #include <omp.h>
 #endif
 
-/// Microbenchmark HPC: Speedup Escalar vs OpenMP vs AVX-512 SIMD (Sección 13.2 de JORO-HPC.tex).
+/// Microbenchmark HPC: Speedup Escalar vs OpenMP vs AVX-512 SIMD (Sección 13.2 de JORO-HPC_Research_Proposal.tex).
 int main() {
     std::cout << "[BENCHMARK] Perfilado de vectorización y multihilo en CPU Core i9-11900K...\n";
 

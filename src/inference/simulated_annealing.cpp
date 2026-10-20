@@ -19,12 +19,12 @@
 
 namespace joro::inference {
 
-// Vector de parámetros dominantes (Cribado de Morris, Fase 3). Los parámetros de baja sensibilidad
+// Vector de parámetros dominantes (Cribado de Morris). Los parámetros de baja sensibilidad
 // quedan fijos en F = 450.0 y Q10 = 2.2. beta_s es DISCRETO en {1, 2, 3} (Sección 8.3 del
 // anteproyecto, configs/priors_bounds.toml: beta_damage_candidates); su rango [1,3] solo delimita el
 // conjunto de candidatos y el optimizador únicamente propone saltos enteros entre ellos.
 //
-// Fase 4.5: K_i se reparametriza con DOS parámetros ortogonales (K0, gamma_hab) sobre el índice
+// K_i se reparametriza con DOS parámetros ortogonales (K0, gamma_hab) sobre el índice
 // compuesto H_hab, y el enlace de ocupación incorpora el intercepto de colonización a0 y el de
 // persistencia b0 (acoplan la escala numérica de A_{i,t}, N_{i,t} con P_hat(Y=1) del Brier).
 namespace {
@@ -129,7 +129,7 @@ PreparedCalibration prepare_calibration(
 {
     PreparedCalibration cal;
 
-    // Guardia de integridad: la partición 2020-2024 está BLOQUEADA hasta la Fase 5.
+    // Guardia de integridad: la partición 2020-2024 está BLOQUEADA hasta la validación fuera de muestra.
     for (const auto& o : raw) {
         if (o.year < kFirstYear || o.year >= kFirstYear + kNYears) {
             throw std::runtime_error("Fila fuera de la ventana de calibración 2014-2019 (año " +

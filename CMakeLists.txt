@@ -139,13 +139,13 @@ if(PQXX_FOUND)
 endif()
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 5. Ejecutable Principal: joro_hpc
+# 5. Ejecutables: joro_hpc (simulación / calibración) y joro_evaluate (validación fuera de muestra)
 # ─────────────────────────────────────────────────────────────────────────────
 add_executable(joro_hpc src/main.cpp)
 target_link_libraries(joro_hpc PRIVATE joro_core)
 
-add_executable(phase5_runner src/phase5_main.cpp)
-target_link_libraries(phase5_runner PRIVATE joro_core)
+add_executable(joro_evaluate src/joro_evaluate.cpp)
+target_link_libraries(joro_evaluate PRIVATE joro_core)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 6. Suite de Pruebas Numéricas (tests/)
@@ -189,7 +189,7 @@ message(STATUS "  Banderas SYCL  : ${JORO_SYCL_FLAGS}")
 message(STATUS "  Banderas OpenMP: ${JORO_OPENMP_FLAGS}")
 message(STATUS "  Banderas Arch  : ${JORO_ARCH_FLAGS}")
 message(STATUS "  Librería Core  : joro_core (estática)")
-message(STATUS "  Ejecutable     : joro_hpc")
+message(STATUS "  Ejecutables    : joro_hpc, joro_evaluate")
 message(STATUS "  Pruebas        : ${JORO_TESTS}")
 message(STATUS "  Benchmarks     : ${JORO_BENCHMARKS}")
 message(STATUS "──────────────────────────────────────────────────────")

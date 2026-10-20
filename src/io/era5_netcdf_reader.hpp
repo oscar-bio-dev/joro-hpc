@@ -96,7 +96,7 @@ struct DailyThermalGrid {
 class Era5NetCdfReader {
 public:
     /// Último año que el simulador puede cargar en memoria durante las Fases 1-4.5. Los archivos 2020-2024
-    /// quedan en disco exclusivamente para la Fase 5 (se desbloquean con JORO_UNLOCK_PHASE5=1).
+    /// quedan en disco exclusivamente para la validación fuera de muestra (se desbloquean con JORO_UNLOCK_EVALUATION=1).
     static constexpr int kLastCalibrationYear = 2019;
 
     explicit Era5NetCdfReader(std::string data_dir);
