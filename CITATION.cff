@@ -1,0 +1,32 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it using the metadata from this file."
+title: "JORO-HPC: Validated Multiscale LPDM-ABM Simulator"
+abstract: >-
+  Multiscale mechanistic simulator of the invasion of Trichonephila clavata (Joro spider)
+  in North America. It couples a 3D Lagrangian particle dispersion model driven by hourly
+  ERA5 reanalysis (SYCL, Intel Arc GPU) with a physiologically structured agent-based
+  demographic model (OpenMP, AVX-512) on a 5 km equal-area grid (EPSG:5070, PostGIS), with
+  multi-start simulated-annealing calibration (2014-2019) and a frozen blind
+  out-of-sample validation (2020-2024).
+type: software
+version: 1.0.0
+date-released: "2026-10-19"
+license: Apache-2.0
+repository-code: "https://github.com/oscar-bio-dev/joro-hpc"
+url: "https://github.com/oscar-bio-dev/joro-hpc"
+authors:
+  - family-names: Mora
+    given-names: Oscar
+    affiliation: "EcoTechLab, Pueblo West, Colorado"
+keywords:
+  - biological invasions
+  - Trichonephila clavata
+  - Lagrangian particle dispersion
+  - agent-based model
+  - ballooning
+  - SYCL
+  - oneAPI
+  - ERA5
+  - PostGIS
+  - inverse calibration
+  - high-performance computing

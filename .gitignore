@@ -78,3 +78,9 @@ Makefile
 *.zip
 *.tar.gz
 *.tar.bz2
+
+# ── Secretos / entorno local (usar .env.example como plantilla) ─────────────
+RUNBOOK.md
+.env
+.env.*
+!.env.example

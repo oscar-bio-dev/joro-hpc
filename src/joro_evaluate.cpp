@@ -41,6 +41,8 @@
 #include <filesystem>
 #include <algorithm>
 #include <random>
+#include <limits>
+#include <array>
 
 namespace {
 
@@ -62,13 +64,61 @@ double dist_to_epicenter_km(float lat, float lon) {
     return std::sqrt(dlat * dlat + dlon * dlon);
 }
 
+// Geometría del polígono semilla: centroide geométrico de las celdas `is_seed` y radio inicial (km).
+// Es la referencia ANGULAR de la expansión: la constante kEpi* queda al oeste del polígono y sesgaría el azimut
+// hacia ~90° Este incluso para un kernel isotrópico. Las distancias del frente (P50/P90/P95) y el envolvente de
+// ocupación siguen usando kEpi*, idénticos a los de la calibración congelada (no se altera ningún parámetro).
+struct SeedGeometry {
+    double lat = kEpiLat;
+    double lon = kEpiLon;
+    double radius_km = 0.0;
+    size_t n_cells = 0;
+};
+SeedGeometry g_seed;
+
+double dist_to_seed_km(float lat, float lon) {
+    const double dlat = (lat - g_seed.lat) * 111.0;
+    const double dlon = (lon - g_seed.lon) * 111.0 * std::cos(g_seed.lat * 0.0174533);
+    return std::sqrt(dlat * dlat + dlon * dlon);
+}
+
+/// Azimut (0 = Norte, 90 = Este) respecto al centroide del polígono semilla.
 double azimuth_from_epicenter_deg(float lat, float lon) {
-    const double dlat = (lat - kEpiLat) * 111.0;
-    const double dlon = (lon - kEpiLon) * 111.0 * std::cos(kEpiLat * 0.0174533);
-    double rad = std::atan2(dlon, dlat); // 0 = Norte, pi/2 = Este
+    const double dlat = (lat - g_seed.lat) * 111.0;
+    const double dlon = (lon - g_seed.lon) * 111.0 * std::cos(g_seed.lat * 0.0174533);
+    double rad = std::atan2(dlon, dlat);
     double deg = rad * 180.0 / M_PI;
     if (deg < 0.0) deg += 360.0;
     return deg;
+}
+
+/// Calcula centroide y radio del polígono semilla (todas las celdas con is_seed == true).
+void compute_seed_geometry(const std::vector<joro::GridCell>& cells) {
+    double sum_lat = 0.0, sum_lon = 0.0;
+    size_t n = 0;
+    for (const auto& c : cells) {
+        if (!c.is_seed) continue;
+        sum_lat += c.centroid_lat;
+        sum_lon += c.centroid_lon;
+        ++n;
+    }
+    if (n == 0) return;  // sin semilla: se conserva la referencia heredada
+    g_seed.lat = sum_lat / static_cast<double>(n);
+    g_seed.lon = sum_lon / static_cast<double>(n);
+    g_seed.n_cells = n;
+    double rmax = 0.0;
+    for (const auto& c : cells) {
+        if (c.is_seed) rmax = std::max(rmax, dist_to_seed_km(c.centroid_lat, c.centroid_lon));
+    }
+    g_seed.radius_km = rmax;
+}
+
+/// Número JSON válido: `null` si no es finito.
+std::string jnum(double v) {
+    if (!std::isfinite(v)) return "null";
+    std::ostringstream os;
+    os << std::setprecision(10) << v;
+    return os.str();
 }
 
 double percentile(std::vector<double>& v, double p) {
@@ -95,7 +145,8 @@ struct EvalRow {
     float p_det;
     float h_norm;
     double dist_epi_km;
-    double angle_epi_deg;
+    double dist_seed_km;   ///< distancia al centroide del polígono semilla
+    double angle_epi_deg;  ///< azimut respecto al centroide del polígono semilla
 };
 
 std::vector<EvalRow> load_eval_dataset(const std::string& csv_path, float h_min, float h_span, float r_min, float r_span) {
@@ -130,11 +181,62 @@ std::vector<EvalRow> load_eval_dataset(const std::string& csv_path, float h_min,
         float r_norm = (r.road_density_r - r_min) / r_span;
         r.p_det = joro::inference::compute_detection_prob(r.effort_araneae, r.h_norm, r_norm);
         r.dist_epi_km = dist_to_epicenter_km(r.centroid_lat, r.centroid_lon);
+        r.dist_seed_km = dist_to_seed_km(r.centroid_lat, r.centroid_lon);
         r.angle_epi_deg = azimuth_from_epicenter_deg(r.centroid_lat, r.centroid_lon);
 
         rows.push_back(r);
     }
     return rows;
+}
+
+/// Offset logit de prevalencia (Platt de solo intercepto) ajustado EXCLUSIVAMENTE en 2014–2019.
+/// J_arrival se optimizó con Brier balanceado 50/50, de modo que la probabilidad marginal cruda subestima la
+/// prevalencia absoluta. Se busca δ tal que  Σ_{p_i>0} σ(logit(p_i) + δ) = nº de presencias observadas (2014–2019).
+/// Las celdas con p_i = 0 (ψ = 0: sin colonización simulada) permanecen en 0: el offset no inventa colonización.
+struct PrevalenceFit {
+    double delta = 0.0;
+    double raw_expected = 0.0;
+    double adj_expected = 0.0;
+    uint64_t observed = 0;
+    bool reached = true;   ///< false si ni δ = +20 alcanza el total observado
+};
+
+inline float adjust_probability(float p, double delta) {
+    if (!(p > 0.0f)) return 0.0f;
+    const double pc = std::clamp(static_cast<double>(p), 1e-9, 1.0 - 1e-9);
+    const double z = std::log(pc / (1.0 - pc)) + delta;
+    return static_cast<float>(1.0 / (1.0 + std::exp(-z)));
+}
+
+PrevalenceFit fit_prevalence_offset(const std::vector<float>& p, const std::vector<EvalRow>& rows) {
+    PrevalenceFit f;
+    for (size_t i = 0; i < rows.size(); ++i) {
+        f.raw_expected += p[i];
+        if (rows[i].y_detected == 1) f.observed++;
+    }
+    auto expected = [&](double delta) {
+        double acc = 0.0;
+        #pragma omp parallel for reduction(+:acc) schedule(static)
+        for (size_t i = 0; i < p.size(); ++i) acc += adjust_probability(p[i], delta);
+        return acc;
+    };
+    const double target = static_cast<double>(f.observed);
+    double lo = -20.0, hi = 20.0;
+    if (expected(hi) < target) {
+        f.delta = hi;
+        f.reached = false;
+    } else if (expected(lo) > target) {
+        f.delta = lo;
+        f.reached = false;
+    } else {
+        for (int it = 0; it < 60; ++it) {
+            const double mid = 0.5 * (lo + hi);
+            if (expected(mid) < target) lo = mid; else hi = mid;
+        }
+        f.delta = 0.5 * (lo + hi);
+    }
+    f.adj_expected = expected(f.delta);
+    return f;
 }
 
 std::vector<std::vector<float>> load_ensemble_thetas(const std::string& csv_path, int expected_params) {
@@ -268,6 +370,12 @@ int main(int argc, char* argv[]) {
     db_client.load_grid(grid_cells);
     std::cout << "[Malla] " << grid_cells.size() << " celdas cargadas desde PostGIS (EPSG:5070).\n";
 
+    // Referencia angular: centroide geométrico del polígono semilla (celdas is_seed)
+    compute_seed_geometry(grid_cells);
+    std::cout << "[Semilla] " << g_seed.n_cells << " celdas semilla | centroide (" << std::fixed << std::setprecision(5)
+              << g_seed.lat << "°N, " << g_seed.lon << "°E) | radio inicial " << std::setprecision(1) << g_seed.radius_km
+              << " km (azimut medido solo sobre celdas colonizadas fuera de ese radio).\n";
+
     // Mapeo espacial O(1) y tabla de índices
     joro::SpatialGridLookup spatial_lookup;
     spatial_lookup.build(grid_cells);
@@ -300,6 +408,18 @@ int main(int argc, char* argv[]) {
     std::unordered_map<int16_t, std::unordered_map<int32_t, size_t>> eval_index_by_year;
     for (size_t i = 0; i < eval_rows.size(); ++i) {
         eval_index_by_year[eval_rows[i].year][eval_rows[i].cell_id] = i;
+    }
+
+    // 3.b Conjunto de calibración 2014–2019 (SOLO para ajustar el offset de prevalencia de la Tabla 5)
+    const std::string calib_csv = "/mnt/hpc_scratch/joro-hpc/calibration_set_2014_2019.csv";
+    auto calib_rows = load_eval_dataset(calib_csv, h_min, h_span, r_min, r_span);
+    std::cout << "[Calibración] " << calib_rows.size() << " filas celda-año (2014–2019) para el offset de prevalencia.\n";
+    uint64_t calib_observed = 0;
+    for (const auto& r : calib_rows) if (r.y_detected == 1) calib_observed++;
+    std::vector<std::vector<size_t>> calib_rows_of_year(kCalibYears);
+    for (size_t i = 0; i < calib_rows.size(); ++i) {
+        const int yi = calib_rows[i].year - kStartYear;
+        if (yi >= 0 && yi < kCalibYears) calib_rows_of_year[static_cast<size_t>(yi)].push_back(i);
     }
 
     // 4. Cargar forzamientos térmicos diarios ERA5 (11 años: 2014..2024)
@@ -375,6 +495,7 @@ int main(int argc, char* argv[]) {
     struct SimRunOutputs {
         std::vector<float> p_marginal_eval; // predicción P(Y=1) para cada fila en eval_rows
         std::vector<float> psi_eval;
+        std::vector<float> p_marginal_calib; // predicción P(Y=1) en las filas de calibración 2014–2019
         std::vector<double> sim_front_p50;
         std::vector<double> sim_front_p90;
         std::vector<double> sim_front_p95;
@@ -392,6 +513,7 @@ int main(int argc, char* argv[]) {
         SimRunOutputs out;
         out.p_marginal_eval.assign(eval_rows.size(), 0.0f);
         out.psi_eval.assign(eval_rows.size(), 0.0f);
+        out.p_marginal_calib.assign(calib_rows.size(), 0.0f);
         out.sim_front_p50.assign(kTotalYears, 0.0);
         out.sim_front_p90.assign(kTotalYears, 0.0);
         out.sim_front_p95.assign(kTotalYears, 0.0);
@@ -499,16 +621,20 @@ int main(int argc, char* argv[]) {
             // Métricas de frente y ángulo
             std::vector<double> distances;
             double sum_sin = 0.0, sum_cos = 0.0;
+            size_t n_angle_cells = 0;
             for (const auto& [cid, count] : fall.adult_density_per_cell) {
                 if (count > 2.0f) {
                     int32_t pos = cidx.find(cid);
                     if (pos >= 0) {
-                        double d = dist_to_epicenter_km(grid_cells[pos].centroid_lat, grid_cells[pos].centroid_lon);
-                        double ang = azimuth_from_epicenter_deg(grid_cells[pos].centroid_lat, grid_cells[pos].centroid_lon);
-                        distances.push_back(d);
-                        double rad = ang * M_PI / 180.0;
-                        sum_sin += std::sin(rad);
-                        sum_cos += std::cos(rad);
+                        const auto& gc = grid_cells[pos];
+                        distances.push_back(dist_to_epicenter_km(gc.centroid_lat, gc.centroid_lon));
+                        // Vector angular de expansión: solo celdas colonizadas FUERA del radio semilla inicial
+                        if (dist_to_seed_km(gc.centroid_lat, gc.centroid_lon) > g_seed.radius_km) {
+                            double rad = azimuth_from_epicenter_deg(gc.centroid_lat, gc.centroid_lon) * M_PI / 180.0;
+                            sum_sin += std::sin(rad);
+                            sum_cos += std::cos(rad);
+                            ++n_angle_cells;
+                        }
                     }
                 }
             }
@@ -516,15 +642,18 @@ int main(int argc, char* argv[]) {
                 out.sim_front_p50[yi] = percentile(distances, 0.50);
                 out.sim_front_p90[yi] = percentile(distances, 0.90);
                 out.sim_front_p95[yi] = percentile(distances, 0.95);
-                double mean_rad = std::atan2(sum_sin, sum_cos);
-                double mean_deg = mean_rad * 180.0 / M_PI;
-                if (mean_deg < 0.0) mean_deg += 360.0;
-                out.sim_mean_angle_deg[yi] = mean_deg;
+                if (n_angle_cells > 0) {
+                    double mean_deg = std::atan2(sum_sin, sum_cos) * 180.0 / M_PI;
+                    if (mean_deg < 0.0) mean_deg += 360.0;
+                    out.sim_mean_angle_deg[yi] = mean_deg;
+                } else {
+                    out.sim_mean_angle_deg[yi] = std::numeric_limits<double>::quiet_NaN();  // sin expansión fuera de la semilla
+                }
             } else {
                 out.sim_front_p50[yi] = 5.0;
                 out.sim_front_p90[yi] = 5.0;
                 out.sim_front_p95[yi] = 5.0;
-                out.sim_mean_angle_deg[yi] = 45.0;
+                out.sim_mean_angle_deg[yi] = std::numeric_limits<double>::quiet_NaN();
             }
 
             // Llenar arreglos densos
@@ -549,6 +678,17 @@ int main(int argc, char* argv[]) {
                 float gamma = joro::inference::compute_colonization_gamma(arr[cid], h_n, occ, r_n, in_env);
                 float phi = joro::inference::compute_persistence_phi(adult[cid], D, occ);
                 psi[i] = joro::inference::update_dynamic_occupancy(psi[i], gamma, phi);
+            }
+
+            // Años de calibración 2014–2019: predicciones sobre las filas de calibración (offset de prevalencia)
+            if (yr < kEvalStartYear) {
+                for (size_t r : calib_rows_of_year[static_cast<size_t>(yi)]) {
+                    const int32_t pos = cidx.find(calib_rows[r].cell_id);
+                    if (pos >= 0) {
+                        out.p_marginal_calib[r] = joro::inference::marginal_observation_prob(psi[static_cast<size_t>(pos)],
+                                                                                              calib_rows[r].p_det);
+                    }
+                }
             }
 
             // Si el año está dentro de 2020–2024, almacenar las predicciones para eval_rows
@@ -625,10 +765,27 @@ int main(int argc, char* argv[]) {
     // Guardaremos las predicciones de cada miembro: [eval_rows][members]
     std::vector<std::vector<float>> m1_ensemble_preds(eval_rows.size(), std::vector<float>(m1_ensemble.size(), 0.0f));
 
+    // Totales anuales esperados por miembro (crudos y con offset de prevalencia ajustado en 2014–2019)
+    std::vector<double> member_delta(m1_ensemble.size(), 0.0);
+    std::vector<std::array<double, kEvalYears>> member_raw_tot(m1_ensemble.size()), member_adj_tot(m1_ensemble.size());
+    std::vector<double> member_calib_raw(m1_ensemble.size(), 0.0), member_calib_adj(m1_ensemble.size(), 0.0);
+
     for (size_t m = 0; m < m1_ensemble.size(); ++m) {
         auto mem_out = run_11year_sim(m1_ensemble[m], joro::abm::CarryingModel::M1, false, 0.0, static_cast<uint32_t>(10000 + m));
         for (size_t r = 0; r < eval_rows.size(); ++r) {
             m1_ensemble_preds[r][m] = mem_out.p_marginal_eval[r];
+        }
+        const auto fit = fit_prevalence_offset(mem_out.p_marginal_calib, calib_rows);
+        member_delta[m] = fit.delta;
+        member_calib_raw[m] = fit.raw_expected;
+        member_calib_adj[m] = fit.adj_expected;
+        member_raw_tot[m].fill(0.0);
+        member_adj_tot[m].fill(0.0);
+        for (size_t r = 0; r < eval_rows.size(); ++r) {
+            const int yk = eval_rows[r].year - kEvalStartYear;
+            if (yk < 0 || yk >= kEvalYears) continue;
+            member_raw_tot[m][static_cast<size_t>(yk)] += mem_out.p_marginal_eval[r];
+            member_adj_tot[m][static_cast<size_t>(yk)] += adjust_probability(mem_out.p_marginal_eval[r], fit.delta);
         }
         if ((m + 1) % 50 == 0 || m + 1 == m1_ensemble.size()) {
             std::cout << "  ... miembro " << (m + 1) << " / " << m1_ensemble.size() << " completado\n";
@@ -651,6 +808,22 @@ int main(int argc, char* argv[]) {
         m1_median[r] = row_vals[static_cast<size_t>(0.50 * (n - 1))];
         m1_p95[r] = row_vals[static_cast<size_t>(0.95 * (n - 1))];
     }
+
+    // 8.b Offset de prevalencia (solo con datos 2014–2019) para M1 MAP y M0 MAP
+    const auto fit_m1 = fit_prevalence_offset(m1_map_out.p_marginal_calib, calib_rows);
+    const auto fit_m0 = fit_prevalence_offset(m0_map_out.p_marginal_calib, calib_rows);
+    std::vector<float> m1_map_adj(eval_rows.size(), 0.0f), m0_map_adj(eval_rows.size(), 0.0f);
+    for (size_t r = 0; r < eval_rows.size(); ++r) {
+        m1_map_adj[r] = adjust_probability(m1_map_out.p_marginal_eval[r], fit_m1.delta);
+        m0_map_adj[r] = adjust_probability(m0_map_out.p_marginal_eval[r], fit_m0.delta);
+    }
+    std::cout << "\n▶ Offset logit de prevalencia (ajustado solo en 2014–2019; presencias observadas = " << calib_observed << "):\n"
+              << std::fixed << std::setprecision(4)
+              << "  M1 MAP: δ = " << fit_m1.delta << " | esperado crudo " << std::setprecision(1) << fit_m1.raw_expected
+              << " → ajustado " << fit_m1.adj_expected << (fit_m1.reached ? "" : "  (objetivo NO alcanzado)") << "\n"
+              << std::setprecision(4)
+              << "  M0 MAP: δ = " << fit_m0.delta << " | esperado crudo " << std::setprecision(1) << fit_m0.raw_expected
+              << " → ajustado " << fit_m0.adj_expected << (fit_m0.reached ? "" : "  (objetivo NO alcanzado)") << "\n";
 
     // 9. Cargar predicciones del Comparador Estático Climático (SDM)
     std::cout << "\n▶ Cargando predicciones del Comparador Climático Estático (SDM)...\n";
@@ -681,7 +854,7 @@ int main(int argc, char* argv[]) {
     {
         std::ofstream out_f(out_pred_csv);
         out_f << "cell_id,year,centroid_lat,centroid_lon,y_observed,effort_araneae,ecoregion_block,"
-              << "p_m1_map,p_m1_median,p_m1_p5,p_m1_p95,p_m0_map,p_iso_null,p_sdm\n";
+              << "p_m1_map,p_m1_median,p_m1_p5,p_m1_p95,p_m0_map,p_iso_null,p_sdm,p_m1_map_adj,p_m0_map_adj\n";
 
         for (size_t r = 0; r < eval_rows.size(); ++r) {
             const auto& row = eval_rows[r];
@@ -698,7 +871,9 @@ int main(int argc, char* argv[]) {
                   << m1_p95[r] << ","
                   << m0_map_out.p_marginal_eval[r] << ","
                   << iso_null_out.p_marginal_eval[r] << ","
-                  << sdm_preds[r] << "\n";
+                  << sdm_preds[r] << ","
+                  << m1_map_adj[r] << ","
+                  << m0_map_adj[r] << "\n";
         }
     }
     std::cout << "✔ Archivo de predicciones espaciales exportado exitosamente.\n";
@@ -847,14 +1022,17 @@ int main(int argc, char* argv[]) {
     for (int yr = 2020; yr <= 2024; ++yr) {
         std::vector<double> dists;
         double s_sin = 0.0, s_cos = 0.0;
-        uint64_t pres = 0;
+        uint64_t pres = 0, n_ang = 0;
         for (const auto& r : eval_rows) {
             if (r.year == yr && r.y_detected == 1) {
                 dists.push_back(r.dist_epi_km);
-                double rad = r.angle_epi_deg * M_PI / 180.0;
-                s_sin += std::sin(rad);
-                s_cos += std::cos(rad);
                 pres++;
+                if (r.dist_seed_km > g_seed.radius_km) {   // azimut solo con presencias fuera del radio semilla
+                    double rad = r.angle_epi_deg * M_PI / 180.0;
+                    s_sin += std::sin(rad);
+                    s_cos += std::cos(rad);
+                    ++n_ang;
+                }
             }
         }
         ObsYearStats oys{};
@@ -863,10 +1041,13 @@ int main(int argc, char* argv[]) {
             oys.p50_km = percentile(dists, 0.50);
             oys.p90_km = percentile(dists, 0.90);
             oys.p95_km = percentile(dists, 0.95);
-            double mean_rad = std::atan2(s_sin, s_cos);
-            double mean_deg = mean_rad * 180.0 / M_PI;
-            if (mean_deg < 0.0) mean_deg += 360.0;
-            oys.mean_angle_deg = mean_deg;
+            if (n_ang > 0) {
+                double mean_deg = std::atan2(s_sin, s_cos) * 180.0 / M_PI;
+                if (mean_deg < 0.0) mean_deg += 360.0;
+                oys.mean_angle_deg = mean_deg;
+            } else {
+                oys.mean_angle_deg = std::numeric_limits<double>::quiet_NaN();
+            }
         }
         obs_stats[yr] = oys;
     }
@@ -1070,14 +1251,62 @@ int main(int argc, char* argv[]) {
             if (ang_err_iso > 180.0) ang_err_iso = 360.0 - ang_err_iso;
 
             kj << "  \"" << yr << "\": {\n"
-               << "    \"obs_p95\": " << o_p95 << ",\n"
-               << "    \"obs_angle\": " << o_ang << ",\n"
-               << "    \"m1_map\": {\"p95\": " << m1_p95_val << ", \"angle\": " << m1_ang << ", \"angular_error_deg\": " << ang_err_m1 << "},\n"
-               << "    \"iso_null\": {\"p95\": " << iso_p95_val << ", \"angle\": " << iso_ang << ", \"angular_error_deg\": " << ang_err_iso << "}\n"
+               << "    \"obs_p95\": " << jnum(o_p95) << ",\n"
+               << "    \"obs_angle\": " << jnum(o_ang) << ",\n"
+               << "    \"m1_map\": {\"p95\": " << jnum(m1_p95_val) << ", \"angle\": " << jnum(m1_ang) << ", \"angular_error_deg\": " << jnum(ang_err_m1) << "},\n"
+               << "    \"iso_null\": {\"p95\": " << jnum(iso_p95_val) << ", \"angle\": " << jnum(iso_ang) << ", \"angular_error_deg\": " << jnum(ang_err_iso) << "}\n"
                << "  }" << (yr == 2024 ? "\n" : ",\n");
         }
         kj << "}\n";
         std::cout << "✔ Cinemática de simulación exportada a " << kin_json_path << "\n";
+    }
+
+    // Geometría del polígono semilla (referencia angular) y escalado de prevalencia: artefactos para los informes
+    {
+        std::ofstream sg("/mnt/hpc_scratch/joro-hpc/outputs/seed_geometry.json");
+        sg << "{\n  \"n_seed_cells\": " << g_seed.n_cells << ",\n  \"centroid_lat\": " << jnum(g_seed.lat)
+           << ",\n  \"centroid_lon\": " << jnum(g_seed.lon) << ",\n  \"radius_km\": " << jnum(g_seed.radius_km)
+           << ",\n  \"legacy_epicenter_lat\": " << jnum(kEpiLat) << ",\n  \"legacy_epicenter_lon\": " << jnum(kEpiLon)
+           << ",\n  \"legacy_to_centroid_km\": " << jnum(dist_to_seed_km(kEpiLat, kEpiLon)) << "\n}\n";
+
+        std::ofstream pj("/mnt/hpc_scratch/joro-hpc/outputs/prevalence_scaling.json");
+        auto arr5 = [&](const std::array<double, kEvalYears>& a) {
+            pj << "[";
+            for (int k = 0; k < kEvalYears; ++k) pj << (k ? "," : "") << jnum(a[static_cast<size_t>(k)]);
+            pj << "]";
+        };
+        std::array<double, kEvalYears> obs_tot{}, m1_raw{}, m1_adj{}, m0_raw{}, m0_adj{};
+        for (size_t r = 0; r < eval_rows.size(); ++r) {
+            const int yk = eval_rows[r].year - kEvalStartYear;
+            if (yk < 0 || yk >= kEvalYears) continue;
+            obs_tot[static_cast<size_t>(yk)] += eval_rows[r].y_detected;
+            m1_raw[static_cast<size_t>(yk)] += m1_map_out.p_marginal_eval[r];
+            m1_adj[static_cast<size_t>(yk)] += m1_map_adj[r];
+            m0_raw[static_cast<size_t>(yk)] += m0_map_out.p_marginal_eval[r];
+            m0_adj[static_cast<size_t>(yk)] += m0_map_adj[r];
+        }
+        pj << "{\n  \"method\": \"offset logit de solo intercepto ajustado en 2014-2019 (presencias observadas = suma de probabilidades; "
+              "celdas con p=0 permanecen en 0)\",\n"
+           << "  \"calibration\": {\"years\": [2014,2019], \"observed\": " << calib_observed << ",\n"
+           << "    \"m1_map\": {\"delta\": " << jnum(fit_m1.delta) << ", \"raw_expected\": " << jnum(fit_m1.raw_expected)
+           << ", \"adj_expected\": " << jnum(fit_m1.adj_expected) << ", \"reached\": " << (fit_m1.reached ? "true" : "false") << "},\n"
+           << "    \"m0_map\": {\"delta\": " << jnum(fit_m0.delta) << ", \"raw_expected\": " << jnum(fit_m0.raw_expected)
+           << ", \"adj_expected\": " << jnum(fit_m0.adj_expected) << ", \"reached\": " << (fit_m0.reached ? "true" : "false") << "}},\n"
+           << "  \"evaluation\": {\"years\": [2020,2021,2022,2023,2024], \"observed\": "; arr5(obs_tot);
+        pj << ",\n    \"m1_map\": {\"raw\": "; arr5(m1_raw); pj << ", \"adj\": "; arr5(m1_adj);
+        pj << "},\n    \"m0_map\": {\"raw\": "; arr5(m0_raw); pj << ", \"adj\": "; arr5(m0_adj);
+        pj << "}},\n  \"ensemble\": {\"n_members\": " << m1_ensemble.size() << ", \"delta\": [";
+        for (size_t m = 0; m < member_delta.size(); ++m) pj << (m ? "," : "") << jnum(member_delta[m]);
+        pj << "],\n    \"calib_raw_expected\": [";
+        for (size_t m = 0; m < member_calib_raw.size(); ++m) pj << (m ? "," : "") << jnum(member_calib_raw[m]);
+        pj << "],\n    \"calib_adj_expected\": [";
+        for (size_t m = 0; m < member_calib_adj.size(); ++m) pj << (m ? "," : "") << jnum(member_calib_adj[m]);
+        pj << "],\n    \"raw_totals\": [";
+        for (size_t m = 0; m < member_raw_tot.size(); ++m) { pj << (m ? "," : ""); arr5(member_raw_tot[m]); }
+        pj << "],\n    \"adj_totals\": [";
+        for (size_t m = 0; m < member_adj_tot.size(); ++m) { pj << (m ? "," : ""); arr5(member_adj_tot[m]); }
+        pj << "]}\n}\n";
+        std::cout << "✔ Geometría semilla y escalado de prevalencia exportados a outputs/seed_geometry.json y outputs/prevalence_scaling.json\n";
     }
 
     // Guardar resumen JSON de métricas

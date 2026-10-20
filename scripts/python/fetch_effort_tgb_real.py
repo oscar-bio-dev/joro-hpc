@@ -30,11 +30,12 @@ from pathlib import Path
 import mapbox_vector_tile as mvt
 import psycopg2
 import requests
+from joro_db import get_db_url
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("joro.effort")
 
-DB_URL = "postgresql://joro_admin:REDACTED_DB_PASSWORD@localhost:5433/joro_db"
+DB_URL = get_db_url()
 TAXON_KEY = 1496  # Araneae (orden)
 YEARS = list(range(2014, 2025))
 ZOOM = 8

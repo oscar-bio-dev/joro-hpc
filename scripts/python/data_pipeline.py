@@ -19,6 +19,7 @@ import logging
 import sys
 from pathlib import Path
 from typing import Any
+from joro_db import get_db_url
 
 # Constantes sincronizadas con Sección 6 y 13 de JORO-HPC_Research_Proposal.tex
 STUDY_BBOX = (-95.0, 25.0, -70.0, 45.0)  # (lon_min, lat_min, lon_max, lat_max)
@@ -74,7 +75,7 @@ def main() -> int:
     parser.add_argument(
         "--db-url",
         type=str,
-        default="postgresql://joro_admin:REDACTED_DB_PASSWORD@localhost:5433/joro_db",
+        default=get_db_url(require_password=False),
         help="URI de conexión a PostgreSQL (default: %(default)s)",
     )
     parser.add_argument(

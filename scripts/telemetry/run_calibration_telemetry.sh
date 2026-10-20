@@ -9,6 +9,8 @@ mkdir -p "$OUT"
 
 # shellcheck disable=SC1091
 set +eu
+# Credenciales de PostGIS: JORO_DB_* desde .env (si existe); nunca se guardan en el repositorio.
+[ -f "$ROOT/.env" ] && { set -a; source "$ROOT/.env"; set +a; }
 source /opt/intel/oneapi/setvars.sh --force > /dev/null 2>&1 || true
 set -eu
 

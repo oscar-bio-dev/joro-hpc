@@ -100,6 +100,14 @@ def criteria_table(rows: list[tuple[str, bool, str]]) -> tuple[str, int, int]:
     return "\n".join(lines), sum(1 for _, ok, _ in rows if ok), len(rows)
 
 
+def nf(x, nd: int = 1) -> str:
+    """Formatea un número; `n/d` si es nulo o no finito (p. ej., sin expansión fuera del radio semilla)."""
+    try:
+        return "n/d" if x is None or x != x else f"{x:.{nd}f}"
+    except TypeError:
+        return "n/d"
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=str(ROOT / "docs" / "reports" / "04_Out_of_Sample_Validation_2020_2024.md"))
@@ -202,17 +210,36 @@ def main() -> int:
 
     # ────────────────────────────── Tabla 3
     A("## 4. Cinemática y geometría del frente de invasión (prueba de H2)\n")
-    A("### Tabla 3: Radio P95 y azimut del frente respecto al epicentro (Braselton, GA)\n")
+    A("### Tabla 3: Radio P95 y azimut del frente (azimut respecto al centroide del polígono semilla)\n")
     A(f"| Año | P95 obs (km) | P95 {M1} (km) | P95 kernel isot. (km) | Azimut obs (°) | Azimut {M1} (°) | Azimut kernel (°) | Error ang. {M1} (°) | Error ang. kernel (°) |")
     A("|---|---|---|---|---|---|---|---|---|")
     for y in YEARS:
         k = kin[y]
-        A(f"| **{y}** | {k['obs_p95']:.1f} | {k['m1_map']['p95']:.1f} | {k['iso_null']['p95']:.1f} | {k['obs_angle']:.1f} | "
-          f"{k['m1_map']['angle']:.1f} | {k['iso_null']['angle']:.1f} | {k['m1_map']['angular_error_deg']:.1f} | "
-          f"{k['iso_null']['angular_error_deg']:.1f} |")
+        A(f"| **{y}** | {k['obs_p95']:.1f} | {k['m1_map']['p95']:.1f} | {k['iso_null']['p95']:.1f} | {nf(k['obs_angle'])} | "
+          f"{nf(k['m1_map']['angle'])} | {nf(k['iso_null']['angle'])} | {nf(k['m1_map']['angular_error_deg'])} | "
+          f"{nf(k['iso_null']['angular_error_deg'])} |")
+    sg = m.get("seed_geometry") or {}
+    if sg:
+        A(f"\n- **Referencia angular:** centroide geométrico de las {sg['n_seed_cells']} celdas semilla "
+          f"({sg['centroid_lat']:.4f}°N, {sg['centroid_lon']:.4f}°E), a {sg['legacy_to_centroid_km']:.1f} km de la constante "
+          f"heredada ({sg['legacy_epicenter_lat']:.4f}°N, {sg['legacy_epicenter_lon']:.4f}°E), que queda al suroeste del polígono. "
+          f"El azimut se mide solo sobre celdas colonizadas **fuera del radio semilla inicial** ({sg['radius_km']:.1f} km), "
+          "tanto en las observaciones como en las simulaciones; las distancias P50/P90/P95 conservan la referencia heredada "
+          "de la calibración (no se altera ningún parámetro ni el envolvente de ocupación).")
     mae = m["first_arrival_mae"]
     A("\n- **Error absoluto medio en la fecha de primera llegada por celda:** "
       f"{M1}: **{mae['m1_map']:.2f} años**; kernel isotrópico: **{mae['iso_null']:.2f} años**; SDM estático: **{mae['sdm']:.2f} años**.")
+    _psi = lambda mk: [kin[y][mk].get("angular_error_psi_deg") for y in YEARS if kin[y][mk].get("angular_error_psi_deg") is not None]  # noqa: E731
+    if _psi("m1_map") and _psi("iso_null"):
+        _bio = [kin[y]["m1_map"]["angular_error_deg"] for y in YEARS if kin[y]["m1_map"]["angular_error_deg"] is not None]
+        ang_m1 = sum(_bio) / max(1, len(_bio))
+        _pm, _pi = sum(_psi("m1_map")) / len(_psi("m1_map")), sum(_psi("iso_null")) / len(_psi("iso_null"))
+        _interp = ("Difiere del azimut del frente biológico de la Tabla 3 (celdas con adultas de la simulación): la capa de ocupación, "
+                   "con el transporte basal por carreteras y la covariable humana, sigue mejor la dirección observada que la expansión "
+                   "biofísica (ABM + viento LPDM)." if _pm + 30.0 < ang_m1 else
+                   "Es del mismo orden que el error del frente biológico de la Tabla 3.")
+        A(r"- **Dirección según la ocupación latente (celdas con $\psi \cdot p_{\text{det}} > 0.001$):** error angular medio de "
+          + f"{M1} {_pm:.1f}° y del kernel {_pi:.1f}°. " + _interp)
     A("- El frente se mide estrictamente sobre las celdas con colonización activa del ABM (`adult_density_per_cell > 2.0`); "
       "el transporte basal por carreteras actúa sobre la ocupación $\\psi$, no sobre el radio del frente biológico.\n")
     A("---\n")
@@ -238,21 +265,33 @@ def main() -> int:
 
     # ────────────────────────────── Incertidumbre
     A("## 6. Propagación de incertidumbre y cobertura empírica\n")
-    A(f"### Tabla 5: Cobertura agregada por año del ensamble {THETA} ({n_m1} miembros)\n")
-    A("Suma anual, sobre todas las celdas, de la probabilidad predicha de detección (percentiles 5, 50 y 95 del ensamble) "
-      "frente al número de presencias observadas.\n")
-    A("| Año | Presencias observadas | Suma P5 | Suma mediana | Suma P95 | ¿Observado dentro del intervalo 90 %? |")
-    A("|---|---|---|---|---|---|")
-    ncov = 0
+    A(f"### Tabla 5: Cobertura agregada por año del ensamble {THETA} ({n_m1} miembros), conteo esperado crudo y ajustado por prevalencia\n")
+    A("Para cada miembro se suma, sobre todas las celdas, la probabilidad predicha de detección de cada año; la tabla muestra los "
+      "percentiles 5, 50 y 95 de esos totales anuales entre miembros frente a las presencias observadas. El **conteo ajustado** "
+      "aplica a cada miembro un offset logit de solo intercepto $\\delta_m$ calculado **exclusivamente con 2014–2019** (hace que "
+      "el total esperado de 2014–2019 iguale las presencias observadas en esa ventana) y se aplica sin cambios a 2020–2024; las "
+      "celdas con probabilidad cero permanecen en cero.\n")
+    A("| Año | Obs. | Crudo P5 | Crudo mediana | Crudo P95 | ¿Cubre? | Ajustado P5 | Ajustado mediana | Ajustado P95 | ¿Cubre? |")
+    A("|---|---|---|---|---|---|---|---|---|---|")
+    ncov = ncov_adj = 0
+    yc = unc["yearly_aggregated_coverage"]
     for y in YEARS:
-        r = unc["yearly_aggregated_coverage"][y]
+        r = yc[y]
         ncov += bool(r["in_90_pi"])
-        A(f"| **{y}** | {r['obs']} | {r['p5']:.1f} | {r['median']:.1f} | {r['p95']:.1f} | {'Sí' if r['in_90_pi'] else 'No'} |")
-    ratio = [unc["yearly_aggregated_coverage"][y]["obs"] / unc["yearly_aggregated_coverage"][y]["median"] for y in YEARS]
-    A(f"\n- **Cobertura agregada:** {ncov} de {len(YEARS)} años con el total observado dentro del intervalo P5–P95.")
-    A(f"- **Subpredicción del total anual:** las presencias observadas superan a la mediana del ensamble en un factor "
-      f"{min(ratio):.1f}–{max(ratio):.1f}; el ensamble discrimina bien (AUC) pero no reproduce la magnitud absoluta de las "
-      "detecciones (ver pendiente de calibración en la Tabla 1).")
+        ncov_adj += bool(r["adj_in_90_pi"])
+        A(f"| **{y}** | {r['obs']} | {r['p5']:.1f} | {r['median']:.1f} | {r['p95']:.1f} | {'Sí' if r['in_90_pi'] else 'No'} | "
+          f"{r['adj_p5']:.1f} | {r['adj_median']:.1f} | {r['adj_p95']:.1f} | {'Sí' if r['adj_in_90_pi'] else 'No'} |")
+    ratio = [yc[y]["obs"] / yc[y]["median"] for y in YEARS]
+    ratio_adj = [yc[y]["obs"] / yc[y]["adj_median"] for y in YEARS]
+    pv = unc["prevalence"]
+    A(f"\n- **Offset de prevalencia (solo 2014–2019, {pv['calibration_observed']} presencias observadas):** {M1} MAP: "
+      f"$\\delta = {pv['m1_map']['delta']:+.3f}$, esperado {pv['m1_map']['raw_expected']:.1f} → {pv['m1_map']['adj_expected']:.1f}; "
+      f"{M0} MAP: $\\delta = {pv['m0_map']['delta']:+.3f}$, esperado {pv['m0_map']['raw_expected']:.1f} → {pv['m0_map']['adj_expected']:.1f}; "
+      f"ensamble: $\\delta$ mediana {pv['ensemble_delta_median']:+.3f} (P5–P95: {pv['ensemble_delta_p5']:+.3f} a {pv['ensemble_delta_p95']:+.3f}).")
+    A(f"- **Cobertura agregada:** crudo {ncov} de {len(YEARS)} años; ajustado {ncov_adj} de {len(YEARS)} años con el total observado dentro del intervalo P5–P95.")
+    A(f"- **Subpredicción del total anual:** observado / mediana = {min(ratio):.1f}–{max(ratio):.1f} (crudo) y "
+      f"{min(ratio_adj):.1f}–{max(ratio_adj):.1f} (ajustado). El ajuste corrige la prevalencia de la ventana de calibración, pero la "
+      "distribución anual de las detecciones sigue creciendo más rápido que el simulador (el intervalo solo propaga incertidumbre paramétrica).")
     A(f"- **Ancho medio de banda $P_{{95}} - P_{{5}}$ por celda:** {unc['mean_band_width']:.5f}.\n")
     A("---\n")
 
@@ -281,8 +320,9 @@ def main() -> int:
     abs_err = lambda mk, y: abs(kin[y][mk]["p95"] - kin[y]["obs_p95"])  # noqa: E731
     mean_err_m1 = sum(abs_err("m1_map", y) for y in YEARS) / len(YEARS)
     mean_err_iso = sum(abs_err("iso_null", y) for y in YEARS) / len(YEARS)
-    ang_m1 = sum(kin[y]["m1_map"]["angular_error_deg"] for y in YEARS) / len(YEARS)
-    ang_iso = sum(kin[y]["iso_null"]["angular_error_deg"] for y in YEARS) / len(YEARS)
+    _ang = lambda mk: [kin[y][mk]["angular_error_deg"] for y in YEARS if kin[y][mk]["angular_error_deg"] is not None]  # noqa: E731
+    ang_m1 = sum(_ang("m1_map")) / max(1, len(_ang("m1_map")))
+    ang_iso = sum(_ang("iso_null")) / max(1, len(_ang("iso_null")))
     h2 = [
         ("Error absoluto del P95 del frente en 2024: M1 < kernel", abs_err("m1_map", "2024") < abs_err("iso_null", "2024"),
          f"{abs_err('m1_map', '2024'):.1f} km vs {abs_err('iso_null', '2024'):.1f} km"),
@@ -301,10 +341,14 @@ def main() -> int:
     A(f"\n> **DICTAMEN H2: {verdict(h2_ok, h2_n)}** ({h2_ok} de {h2_n} criterios).\n")
 
     A("### Hallazgos que matizan los dictámenes\n")
-    A(f"- **Dirección del frente:** tanto {M1} ({ang_m1:.0f}° de error medio) como el kernel ({ang_iso:.0f}°) fallan por más de 130° "
-      "el azimut observado; el LPDM no mejora la dirección de expansión con los datos y la calibración actuales.")
+    _diff_ang = ang_iso - ang_m1
+    A(f"- **Dirección del frente (referencia: centroide del polígono semilla):** error angular medio de {M1} {ang_m1:.0f}° y del kernel "
+      f"{ang_iso:.0f}° (diferencia a favor de {M1}: {_diff_ang:+.0f}°). "
+      + ("El LPDM no mejora la dirección de expansión con los datos y la calibración actuales."
+         if _diff_ang < ANGULAR_MARGIN_DEG else "El LPDM mejora la dirección de expansión respecto al kernel isotrópico."))
     A(f"- **Calibración absoluta:** la pendiente de calibración de {M1} es {g['m1_map']['calib_slope']:.3f} (ideal 1) y el ensamble "
-      f"cubre el total observado en {ncov} de {len(YEARS)} años: el modelo ordena bien las celdas pero subestima la magnitud.")
+      f"cubre el total observado en {ncov} de {len(YEARS)} años (crudo) y {ncov_adj} de {len(YEARS)} (con offset de prevalencia): "
+      "el modelo ordena bien las celdas pero subestima la magnitud.")
     A(f"- **{M1} frente a {M0}:** AUC-ROC {g['m1_map']['auc_roc']:.4f} vs {g['m0_map']['auc_roc']:.4f}; Brier global "
       f"{g['m1_map']['brier_global']:.5f} vs {g['m0_map']['brier_global']:.5f}; PR-AUC {g['m1_map']['pr_auc']:.4f} vs {g['m0_map']['pr_auc']:.4f}. "
       f"La capacidad de carga dependiente del hábitat ({M1}) no supera de forma consistente a la constante ({M0}).")

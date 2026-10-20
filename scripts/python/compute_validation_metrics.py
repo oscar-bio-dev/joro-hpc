@@ -19,17 +19,41 @@ from sklearn.linear_model import LinearRegression
 PRED_CSV = "/mnt/hpc_scratch/joro-hpc/outputs/predictions_2020_2024_ensemble.csv"
 OUT_JSON = "/mnt/hpc_scratch/joro-hpc/outputs/validation_metrics.json"
 
+SEED_JSON = "/mnt/hpc_scratch/joro-hpc/outputs/seed_geometry.json"
+PREV_JSON = "/mnt/hpc_scratch/joro-hpc/outputs/prevalence_scaling.json"
+
+# Referencia heredada de la calibración: distancias del frente (P50/P90/P95) y envolvente de ocupación.
 EPI_LAT = 34.13816
 EPI_LON = -83.75723
+
+
+def load_seed_geometry():
+    """Centroide y radio del polígono semilla (artefacto de `joro_evaluate`; referencia angular del frente)."""
+    if not os.path.exists(SEED_JSON):
+        raise SystemExit(f"Falta {SEED_JSON}: ejecute joro_evaluate primero")
+    with open(SEED_JSON) as fh:
+        return json.load(fh)
+
+
+SEED = load_seed_geometry()
+
 
 def dist_km(lat, lon):
     dlat = (lat - EPI_LAT) * 111.0
     dlon = (lon - EPI_LON) * 111.0 * np.cos(np.radians(EPI_LAT))
     return np.sqrt(dlat**2 + dlon**2)
 
+
+def dist_seed_km(lat, lon):
+    dlat = (lat - SEED["centroid_lat"]) * 111.0
+    dlon = (lon - SEED["centroid_lon"]) * 111.0 * np.cos(np.radians(SEED["centroid_lat"]))
+    return np.sqrt(dlat**2 + dlon**2)
+
+
 def azimuth_deg(lat, lon):
-    dlat = (lat - EPI_LAT) * 111.0
-    dlon = (lon - EPI_LON) * 111.0 * np.cos(np.radians(EPI_LAT))
+    """Azimut (0 = Norte, 90 = Este) respecto al centroide geométrico del polígono semilla."""
+    dlat = (lat - SEED["centroid_lat"]) * 111.0
+    dlon = (lon - SEED["centroid_lon"]) * 111.0 * np.cos(np.radians(SEED["centroid_lat"]))
     deg = np.degrees(np.arctan2(dlon, dlat)) % 360.0
     return deg
 
@@ -74,6 +98,8 @@ def main():
 
     df["dist"] = dist_km(df["centroid_lat"].values, df["centroid_lon"].values)
     df["angle"] = azimuth_deg(df["centroid_lat"].values, df["centroid_lon"].values)
+    df["dist_seed"] = dist_seed_km(df["centroid_lat"].values, df["centroid_lon"].values)
+    seed_r = float(SEED["radius_km"])
 
     models = {
         "m1_map": "p_m1_map",
@@ -141,12 +167,12 @@ def main():
         sub = df[df["year"] == yr]
         obs = sub[sub["y_observed"] == 1]
         obs_dists = obs["dist"].values
-        obs_angles = obs["angle"].values
+        obs_angles = obs[obs["dist_seed"] > seed_r]["angle"].values   # solo presencias fuera del radio semilla
 
         o_p50 = float(np.percentile(obs_dists, 50))
         o_p90 = float(np.percentile(obs_dists, 90))
         o_p95 = float(np.percentile(obs_dists, 95))
-        o_ang = float(circular_mean(obs_angles))
+        o_ang = float(circular_mean(obs_angles)) if len(obs_angles) else float("nan")
 
         yr_kin = {
             "obs_p50": o_p50, "obs_p90": o_p90, "obs_p95": o_p95, "obs_angle": o_ang
@@ -158,12 +184,12 @@ def main():
             if len(pred_cells) == 0:
                 pred_cells = sub[sub[col] > 0.0]
             p_dists = pred_cells["dist"].values
-            p_angles = pred_cells["angle"].values
+            p_angles = pred_cells[pred_cells["dist_seed"] > seed_r]["angle"].values
 
             m_p50 = float(np.percentile(p_dists, 50)) if len(p_dists) else 0.0
             m_p90 = float(np.percentile(p_dists, 90)) if len(p_dists) else 0.0
             m_p95 = float(np.percentile(p_dists, 95)) if len(p_dists) else 0.0
-            m_ang = float(circular_mean(p_angles)) if len(p_angles) else 0.0
+            m_ang = float(circular_mean(p_angles)) if len(p_angles) else float("nan")
             rmse_front = float(np.sqrt(np.mean([(m_p50 - o_p50)**2, (m_p90 - o_p90)**2, (m_p95 - o_p95)**2])))
             ang_err = float(angular_diff(m_ang, o_ang))
 
@@ -182,6 +208,12 @@ def main():
         for yr_str, yk in sim_kin.items():
             yr_int = int(yr_str)
             if yr_int in kin:
+                # Dirección alternativa: celdas con ocupación latente predicha (psi*p_det > 0.001), antes de sustituirla
+                # por la cinemática del frente biológico (celdas con adultas > 2) que exporta C++.
+                for _mk in ("m1_map", "iso_null"):
+                    kin[yr_int][_mk]["angle_psi"] = kin[yr_int][_mk]["angle"]
+                    kin[yr_int][_mk]["angular_error_psi_deg"] = kin[yr_int][_mk]["angular_error_deg"]
+                kin[yr_int]["obs_angle_psi"] = kin[yr_int]["obs_angle"]
                 kin[yr_int]["obs_p95"] = yk["obs_p95"]
                 kin[yr_int]["obs_angle"] = yk["obs_angle"]
                 kin[yr_int]["m1_map"]["p95"] = yk["m1_map"]["p95"]
@@ -324,21 +356,34 @@ def main():
     results["thermal_persistence"]["auc_unseen"] = auc_unseen
 
     print("\n--- 5. PROPAGACIÓN DE INCERTIDUMBRE (Theta_comp) ---")
+
+    # Cobertura agregada por año: percentiles de los TOTALES ANUALES de cada miembro del ensamble Θ_comp.
+    # `joro_evaluate` exporta, por miembro, la suma anual de probabilidades (cruda) y la ajustada con el offset
+    # logit de prevalencia ajustado exclusivamente en 2014–2019 (outputs/prevalence_scaling.json).
+    if not os.path.exists(PREV_JSON):
+        raise SystemExit(f"Falta {PREV_JSON}: ejecute joro_evaluate primero")
+    with open(PREV_JSON) as fh:
+        prev = json.load(fh)
+    raw_t = np.array(prev["ensemble"]["raw_totals"])      # [miembros, 5]
+    adj_t = np.array(prev["ensemble"]["adj_totals"])
+    yearly_cov = {}
+    for k, yr in enumerate(range(2020, 2025)):
+        obs_sum = int(df[df["year"] == yr]["y_observed"].sum())
+        assert obs_sum == int(round(prev["evaluation"]["observed"][k])), "observados inconsistentes con prevalence_scaling.json"
+        r5, rm, r95 = (float(np.percentile(raw_t[:, k], q)) for q in (5, 50, 95))
+        a5, am, a95 = (float(np.percentile(adj_t[:, k], q)) for q in (5, 50, 95))
+        yearly_cov[yr] = {
+            "obs": obs_sum,
+            "p5": r5, "median": rm, "p95": r95, "in_90_pi": bool(r5 <= obs_sum <= r95),
+            "adj_p5": a5, "adj_median": am, "adj_p95": a95, "adj_in_90_pi": bool(a5 <= obs_sum <= a95),
+            "m1_map_raw": float(prev["evaluation"]["m1_map"]["raw"][k]),
+            "m1_map_adj": float(prev["evaluation"]["m1_map"]["adj"][k]),
+        }
+        print(f"Año {yr}: Obs={obs_sum:4d} | crudo P5-P95: [{r5:6.1f}, {r95:6.1f}] ({yearly_cov[yr]['in_90_pi']}) | "
+              f"ajustado P5-P95: [{a5:6.1f}, {a95:6.1f}] ({yearly_cov[yr]['adj_in_90_pi']})")
     p5 = df["p_m1_p5"].values
     p95 = df["p_m1_p95"].values
     med = df["p_m1_median"].values
-
-    # Cobertura sobre agregación de celdas por año
-    yearly_cov = {}
-    for yr in range(2020, 2025):
-        sub = df[df["year"] == yr]
-        obs_sum = int(sub["y_observed"].sum())
-        p5_sum = float(sub["p_m1_p5"].sum())
-        med_sum = float(sub["p_m1_median"].sum())
-        p95_sum = float(sub["p_m1_p95"].sum())
-        in_pi = bool(p5_sum <= obs_sum <= p95_sum)
-        yearly_cov[yr] = {"obs": obs_sum, "p5": p5_sum, "median": med_sum, "p95": p95_sum, "in_90_pi": in_pi}
-        print(f"Año {yr}: Obs={obs_sum:4d} | Intervalo 90% P5-P95: [{p5_sum:6.1f}, {p95_sum:6.1f}] | Cubierto: {in_pi}")
 
     try:
         with open("/mnt/hpc_scratch/joro-hpc/checkpoints/calibration_summary_M1.json") as fh:
@@ -348,7 +393,19 @@ def main():
     results["uncertainty"] = {
         "ensemble_size": ensemble_size,
         "mean_band_width": float(np.mean(p95 - p5)),
-        "yearly_aggregated_coverage": yearly_cov
+        "yearly_aggregated_coverage": yearly_cov,
+        "prevalence": {
+            "method": prev["method"],
+            "calibration_observed": prev["calibration"]["observed"],
+            "m1_map": prev["calibration"]["m1_map"],
+            "m0_map": prev["calibration"]["m0_map"],
+            "ensemble_delta_median": float(np.median(prev["ensemble"]["delta"])),
+            "ensemble_delta_p5": float(np.percentile(prev["ensemble"]["delta"], 5)),
+            "ensemble_delta_p95": float(np.percentile(prev["ensemble"]["delta"], 95)),
+            "ensemble_calib_raw_median": float(np.median(prev["ensemble"]["calib_raw_expected"])),
+            "ensemble_calib_adj_median": float(np.median(prev["ensemble"]["calib_adj_expected"])),
+        },
+        "seed_geometry": SEED,
     }
 
     with open(OUT_JSON, "w") as f:

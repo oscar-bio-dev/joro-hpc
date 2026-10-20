@@ -73,12 +73,13 @@ k_min = 100.0
 k_max = 50000.0
 
 [database]
-# Conexión a PostgreSQL / PostGIS (migrado a puerto 5433 para evitar colisiones Docker)
+# Conexión a PostgreSQL / PostGIS (puerto 5433 para evitar colisiones Docker).
+# Valores efectivos: variables de entorno JORO_DB_HOST/PORT/NAME/USER/PASSWORD (ver .env.example).
+# La contraseña NO se guarda aquí: se lee exclusivamente de JORO_DB_PASSWORD.
 host = "localhost"
 port = 5433
 dbname = "joro_db"
 user = "joro_admin"
-password = "REDACTED_DB_PASSWORD"
 tablespace = "hpc_fast"
 table_grid = "grid_5km"
 table_observations = "cell_annual_observations"

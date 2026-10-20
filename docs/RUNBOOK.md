@@ -11,6 +11,7 @@ Checklist paso a paso para reproducir el flujo completo: compilación, datos, ca
 - [ ] CPU con AVX-512 (referencia: i9-11900K; la compilación usa `-march=rocketlake`).
 - [ ] CMake ≥ 3.22, `libnetcdf`, `libpqxx` (opcional; sin ella se usan *stubs*).
 - [ ] PostgreSQL ≥ 14 + PostGIS ≥ 3.3 en el puerto 5433 (esquema en `scripts/sql/`).
+- [ ] Credenciales de la base de datos **sólo por entorno**: `cp .env.example .env`, edite `JORO_DB_PASSWORD` y cargue con `set -a; source .env; set +a` (`.env` está ignorado por Git). Variables: `JORO_DB_HOST` (`localhost`), `JORO_DB_PORT` (`5433`), `JORO_DB_NAME` (`joro_db`), `JORO_DB_USER` (`joro_admin`), `JORO_DB_PASSWORD` (sin valor por defecto). Los *scripts* de calibración cargan `.env` automáticamente si existe.
 - [ ] Almacenamiento: `/mnt/hpc_scratch/joro-hpc` (el enlace `data/` del repositorio apunta ahí; está ignorado por Git) y, opcionalmente, `/mnt/ecotech_datalake`.
 - [ ] Entorno Python: `python3 -m venv .venv && .venv/bin/pip install -r scripts/python/requirements.txt`.
 
@@ -63,7 +64,7 @@ bash scripts/run_calibration.sh        # M1 (principal), M0 y M3; 5 cadenas x 40
 .venv/bin/python scripts/python/generate_validation_report.py      # docs/reports/04_Out_of_Sample_Validation_2020_2024.md
 ```
 
-- [ ] Salidas en `outputs/`: `predictions_2020_2024_ensemble.csv`, `validation_sim_kinematics.json`, `validation_metrics.json`.
+- [ ] Salidas en `outputs/`: `predictions_2020_2024_ensemble.csv`, `validation_sim_kinematics.json`, `validation_metrics.json`, `seed_geometry.json` (centroide y radio de las 124 celdas semilla, referencia del azimut) y `prevalence_scaling.json` (offset logit de prevalencia ajustado sólo con 2014–2019).
 - [ ] Duración de referencia de `joro_evaluate`: ≈ 27 s.
 - [ ] El informe 04 calcula los dictámenes de H1 y H2 con criterios fijos; revise la sección «Hallazgos que matizan los dictámenes».
 
@@ -73,6 +74,7 @@ bash scripts/run_calibration.sh        # M1 (principal), M0 y M3; 5 cadenas x 40
 ./build/test_well_mixed && ./build/test_euler_maruyama_conv && ./build/test_cpu_gpu_equivalence
 ./build/joro_hpc --engine=both --no-calibration          # informe 01 (CPU vs GPU)
 ./build/joro_hpc --engine=gpu --morris --no-calibration  # informe 02 (Morris)
+./build/joro_hpc --diagnostics --engine=gpu              # transecto real (ABM + ERA5 diario) + Morris
 ```
 
 ## 8. Propuesta en PDF
@@ -98,11 +100,11 @@ El ejecutable `phase5_runner` fue renombrado a `joro_evaluate`.
 
 ## 10. Problemas conocidos
 
-1. **Transecto latitudinal (`--transect`).** La tabla 2 está escrita con valores fijos en `src/main.cpp` (ahora rotulada como escenario de referencia) y la tabla 1 (saturación en el epicentro) devuelve 0 adultas en la celda testigo. No usar como resultado; pendiente de reimplementar con el ABM y el forzamiento térmico real.
-2. **Identificabilidad en $\mathcal{M}_1$.** En $\Theta_{\text{comp}}$ hay pares con $|\rho| \ge 0.9$ (`gamma_hab`–`a0`, `k0`–`a0`, `k0`–`gamma_hab`); estos parámetros no se interpretan por separado (informe 03).
-3. **Calibración absoluta.** El ensamble discrimina bien (AUC ≈ 0.97) pero subestima el total anual de detecciones 4–8 veces y no cubre lo observado en el intervalo P5–P95 (informe 04, tabla 5).
-4. **Dirección del frente.** El error angular medio (≈ 159°) es igual al del kernel isotrópico: el LPDM no mejora la dirección de expansión (informe 04, tabla 3).
-5. **CPU frente a GPU.** Las corridas acopladas divergen estocásticamente (hasta 9.5 % en propágulos en 2019); calibrar y evaluar siempre con el mismo motor (informe 01).
-6. **`-march=rocketlake`.** Las banderas de producción son específicas de la CPU de referencia; sin ellas, CMake cae a `-march=x86-64-v3` (portable).
-7. **Hardware en la propuesta.** El texto de la propuesta menciona una Arc A770; las corridas documentadas se hicieron en una Arc A380.
-8. **Credenciales embebidas.** La contraseña de desarrollo de PostGIS (`REDACTED_DB_PASSWORD`) está escrita en `src/common/config_parser.hpp`, `configs/default_mvp.toml` y varios scripts de `scripts/python/`. Cambiarla y moverla a variables de entorno antes de exponer una base de datos real.
+1. **Identificabilidad en $\mathcal{M}_1$.** En $\Theta_{\text{comp}}$ hay pares con $|\rho| \ge 0.9$ (`gamma_hab`–`a0`, `k0`–`a0`, `k0`–`gamma_hab`); estos parámetros no se interpretan por separado (informe 03).
+2. **Calibración absoluta.** El ensamble discrimina bien (AUC ≈ 0.97) pero subestima el total anual de detecciones 4.0–7.7 veces (crudo). El offset logit de prevalencia, ajustado sólo con 2014–2019, lo reduce a 2.4–4.9 veces, pero no cubre lo observado en el intervalo P5–P95 en ninguno de los 5 años (informe 04, tabla 5).
+3. **Dirección del frente.** Con el azimut referido al centroide real de las 124 celdas semilla, el error angular medio del LPDM (≈ 160°) sigue siendo peor que el del kernel isotrópico (≈ 125°): el LPDM no mejora la dirección de expansión sobre las celdas colonizadas fuera del radio semilla (informe 04, tabla 3). La discrepancia direccional medida con ψ (≈ 25°) sugiere que el desacople proviene de dónde se detecta, no de dónde llegan los propágulos.
+4. **CPU frente a GPU.** Las corridas acopladas divergen estocásticamente (hasta 9.5 % en propágulos en 2019); calibrar y evaluar siempre con el mismo motor (informe 01).
+5. **`-march=rocketlake`.** Las banderas de producción son específicas de la CPU de referencia; sin ellas, CMake cae a `-march=x86-64-v3` (portable).
+6. **Hardware en la propuesta.** El texto de la propuesta menciona una Arc A770; las corridas y *benchmarks* documentados se hicieron en la GPU de desarrollo Arc A380 y están listos para la A770.
+7. **Transecto con parámetros nominales.** `--transect` usa los parámetros demográficos nominales (no $\Theta_{\text{comp}}$ calibrado): la persistencia falla desde ≈ 36.5 °N, lo que contradice la expansión observada (informe 02, sección 4).
+8. **Historial de Git.** Versiones anteriores a `v1.0.0` contienen una contraseña de desarrollo en el historial; debe rotarse en cualquier base de datos expuesta.

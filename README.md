@@ -15,7 +15,9 @@
 
 **Principal Investigator:** Oscar Mora  
 **Institution:** EcoTechLab · Pueblo West, Colorado  
-**Platform Target:** Intel Core i9-11900K (Rocket Lake AVX-512) · Intel Arc A770 16 GB (Level-Zero SYCL)
+**Platform Target:** Intel Core i9-11900K (Rocket Lake AVX-512) · Intel Arc A770 16 GB (Level-Zero SYCL)  
+**Development / validation hardware:** all benchmarks and validations reported here were run on the development GPU **Intel Arc A380** (6 GB); the code is ready for the Arc A770 target, which has not been measured yet.  
+**Release:** v1.0.0 · cite with [`CITATION.cff`](CITATION.cff) · changes in [`CHANGELOG.md`](CHANGELOG.md)
 
 </div>
 
@@ -46,7 +48,7 @@ The simulation explicitly resolves:
                                       ▼
   ┌────────────────────────────────────────────────────────────────────────┐
   │            PHASE 1: 3D LAGRANGIAN DISPERSION (GPU / SYCL)              │
-  │  Intel Arc A770 · Device USM · Stochastic Euler-Maruyama Integration   │
+  │  Intel Arc (A380 dev / A770 target) · Device USM · Euler-Maruyama SDE  │
   │  - Horizontal advection: dX = U dt,  dY = V dt                         │
   │  - Vertical Langevin: dw' = a_w(w', z) dt + b_w(z) dW  (Thomson 1987)  │
   │  - Aerodynamic settling: v_s = h(M, L_s, chi, rho, mu)                 │
@@ -117,10 +119,41 @@ where $E_{i,t}^{\rm Araneae}$ is the observation count of order Araneae in cell 
 
 | Component | Target Architecture | Implementation Technique | Empirical Benchmark |
 | :--- | :--- | :--- | :--- |
-| **Demographic ABM** | Intel Core i9-11900K | 64-byte aligned SoA (`CohortSoA`), AVX-512 OpenMP SIMD | **$850.24\text{ M}$ cohort updates/sec** ($2.35\text{ ms}$ for $2\times 10^6$ agents) |
-| **3D LPDM Advection** | Intel Arc A770 (16 GB) | DPC++/SYCL kernel, Device USM, Level-Zero runtime | **$38.43\text{ ms}$** allocation/fill for $1\times 10^6$ particles |
+| **Demographic ABM** | Intel Core i9-11900K | 64-byte aligned SoA (`CohortSoA`), AVX-512 OpenMP SIMD | **$877.6\text{ M}$ cohort updates/sec** ($2.28\text{ ms}$ for $2\times 10^6$ agents) |
+| **3D LPDM Advection** | Intel Arc A380 (dev. GPU; A770 pending) | DPC++/SYCL kernel, Device USM, Level-Zero runtime | **$9.40\text{ ms}$** allocation/fill for $1\times 10^6$ particles |
 | **ERA5 Atmospheric I/O** | NVMe Storage / Host RAM | Direct NetCDF-C / HDF5 chunked streaming | **$\sim 42\text{--}50\text{ GB}$** bypassed from SQL, zero DB lock |
 | **Spatial Database** | PostgreSQL 16 + PostGIS 3.4 | EPSG:5070 Conus Albers ($25\text{ km}^2$ equal-area grid) | GIST spatial indexing across $\sim 200{,}000$ cells |
+
+Calibration of the 2,000-evaluation continental budget and the full blind validation (439 ensemble members × 11 simulated years) run in
+tens of seconds on the development machine (`joro_evaluate`: 29.4 s wall time; see [`docs/reports/04_Out_of_Sample_Validation_2020_2024.md`](docs/reports/04_Out_of_Sample_Validation_2020_2024.md)
+and the hardware profile in [`docs/telemetry/calibration_hardware_profile.json`](docs/telemetry/calibration_hardware_profile.json)).
+
+---
+
+## 📈 Audited Results (v1.0.0)
+
+All figures below are produced by `joro_evaluate` + `scripts/python/compute_validation_metrics.py` and copied from the reports; the parameters were frozen
+with 2014–2019 data and **never re-tuned** on 2020–2024 (199,602 cell-year rows, 2,442 observed presences).
+
+| Metric (2020–2024) | JORO-HPC $\mathcal{M}_1$ | Isotropic kernel (H2) | Static SDM (H1) |
+| :--- | :---: | :---: | :---: |
+| AUC-ROC | **0.9712** | 0.8884 | 0.9043 |
+| Log-Loss | **0.0425** | 0.0661 | 0.0634 |
+| Brier (global) | **0.01079** | 0.01113 | 0.01159 |
+| PR-AUC | 0.4475 | **0.5057** | 0.1619 |
+| False positives north of 38 °N | **0.00 %** | 0.00 % | 9.33 % |
+| Interannual-persistence Brier | 0.4683 | 0.4830 | **0.4554** |
+
+**Verdicts (rule-based, report 04):** H1 *supported with caveats* (7/8 criteria; fails persistence Brier vs the SDM) and H2 *supported with caveats*
+(6/8; fails PR-AUC and angular error).
+
+**Honest limitations**
+* **Absolute magnitude.** The ensemble ranks cells well but underestimates annual detection totals (observed/median ≈ 4–8×). A logit prevalence offset fitted
+  *only* on 2014–2019 (δ ≈ +0.63 for the MAP; 57.7 → 106 expected presences) reduces the gap to ≈ 2.4–4.9× but the P5–P95 band still covers no year (Table 5, report 04).
+* **Front direction.** With azimuth measured from the centroid of the 124 seed cells, the mean angular error of $\mathcal{M}_1$ (≈ 160°) is larger than that of the isotropic
+  kernel (≈ 125°): the 3D transport does not improve the direction of expansion. Front radius is better (P95 error 6.1 km vs 153.2 km in 2024).
+* **Identifiability.** `gamma_hab`, `k0` and `a0` are strongly collinear (|ρ| up to 0.96; report 03); interpret them jointly.
+* **Transect.** With nominal demographic parameters persistence fails north of ≈ 34 °N (report 02).
 
 ---
 
@@ -132,7 +165,10 @@ joro-hpc/
 │   └── workflows/
 │       ├── ci.yml                     # Multi-compiler CI (GCC, Clang, oneAPI SYCL)
 │       └── python-qc.yml              # Python pipeline linting (flake8, black)
-├── CMakeLists.txt                     # C++20, Intel icpx, -fsycl, -qopenmp, -march=rocketlake
+├── CITATION.cff                       # Citation metadata (CFF 1.2.0)
+├── CHANGELOG.md · CONTRIBUTING.md · CODE_OF_CONDUCT.md
+├── .env.example                       # JORO_DB_* connection variables (copy to .env, git-ignored)
+├── CMakeLists.txt                     # C++20, Intel icpx, -fsycl, -qopenmp, -march=rocketlake (targets: joro_hpc, joro_evaluate)
 ├── configs/
 │   ├── default_mvp.toml               # Domain bounds [-95,-70]x[25,45], ERA5 levels, time steps
 │   └── priors_bounds.toml             # Parameter priors, search bounds, and cost weights
@@ -141,7 +177,7 @@ joro-hpc/
 ├── docs/
 │   ├── RUNBOOK.md                     # Operational checklist (build, run, validate)
 │   ├── proposal/                      # JORO-HPC_Research_Proposal.{tex,pdf}
-│   ├── reports/                       # 01..04 verification, calibration & validation reports
+│   ├── reports/                       # 01_LPDM… 02_ABM… 03_Inverse_Calibration… 04_Out_of_Sample_Validation…
 │   └── telemetry/                     # calibration_hardware_profile.json
 ├── scripts/
 │   ├── sql/
@@ -149,7 +185,9 @@ joro-hpc/
 │   │   ├── 02_spatial_blocks.sql      # EPA Level III ecoregion blocks (2014-2019 vs 2020-2024)
 │   │   └── 03_seed_smoke_grid.sql     # Fast synthetic EPSG:5070 grid & Georgia seed generator (Smoke Test)
 │   └── python/
+│       ├── joro_db.py                 # PostGIS connection from JORO_DB_* environment variables
 │       ├── data_pipeline.py           # Main CLI orchestrator
+│       ├── generate_calibration_report.py / generate_validation_report.py  # reports 03 and 04 from run artifacts
 │       ├── generate_daily_thermal_forcing.py # 365-day ERA5 daily thermal forcing generator (NetCDF4)
 │       ├── fetch_gbif_tgb.py          # GBIF occurrences + Araneae TGB effort + iNat API
 │       ├── fetch_era5_3d.py           # CDS API downloader (12 levels 1000-700 hPa to NetCDF4)
@@ -157,7 +195,8 @@ joro-hpc/
 │       ├── surrogate_emulator.py      # Plan B: Latin Hypercube (500 pts) + Gaussian Process
 │       └── requirements.txt
 ├── src/
-│   ├── main.cpp                       # Coupled annual simulation loop orchestrator, calibration (`--calibrate`), transect (`--transect`) & Morris (`--morris`) runner
+│   ├── main.cpp                       # `joro_hpc`: coupled simulation, calibration (`--calibrate`), transect (`--transect`) & Morris (`--morris`)
+│   ├── joro_evaluate.cpp              # `joro_evaluate`: frozen blind validation 2020–2024, null models, prevalence offset
 │   ├── common/                        # types.hpp, config_parser.hpp, spatial_grid_lookup.hpp (O(1))
 │   ├── io/                            # era5_netcdf_reader, postgis_client
 │   ├── lpdm/                          # lpdm_engine, cpu_baseline, sycl_kernel, langevin, settling
@@ -213,7 +252,18 @@ cmake -B build \
 cmake --build build -j$(nproc)
 ```
 
-### 3. Running Verification Tests & Benchmarks
+### 3. Database credentials (environment variables)
+
+No password is stored in the repository. Copy the template and fill in the password (the file `.env` is ignored by Git):
+
+```bash
+cp .env.example .env && $EDITOR .env      # JORO_DB_HOST/PORT/NAME/USER/PASSWORD
+set -a && source .env && set +a           # exports them for joro_hpc / joro_evaluate (Python scripts and run_calibration.sh read .env themselves)
+```
+
+Defaults: `localhost`, `5433`, `joro_db`, `joro_admin`; `JORO_DB_PASSWORD` has no default.
+
+### 4. Running Verification Tests & Benchmarks
 
 > **Scientific Verification Guarantee:** All numerical tests use NDEBUG-invariant assertions (`JORO_TEST_ASSERT` with `-UNDEBUG`). Tests genuinely execute full stochastic ensembles, parameter recovery optimization, and GPU-CPU statistical equivalence rather than returning passive no-ops in Release mode.
 
@@ -232,7 +282,13 @@ ctest --test-dir build --output-on-failure
 
 # Latitudinal transect & Morris screening diagnostics (alias: --diagnostics, legacy: --phase3)
 ./build/joro_hpc --engine gpu --transect --morris
+
+# Inverse calibration 2014–2019 (legacy: --phase4) and blind validation 2020–2024
+bash scripts/run_calibration.sh
+JORO_UNLOCK_EVALUATION=1 ./build/joro_evaluate     # joro_evaluate sets the variable itself; see docs/RUNBOOK.md
 ```
+
+The step-by-step operating checklist is in [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
 
 ---
 

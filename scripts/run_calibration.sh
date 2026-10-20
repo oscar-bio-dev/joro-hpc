@@ -8,6 +8,8 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CK=/mnt/hpc_scratch/joro-hpc/checkpoints
 LOGS=/mnt/hpc_scratch/joro-hpc/logs
 mkdir -p "$CK" "$LOGS"
+# Credenciales de PostGIS: JORO_DB_* desde .env (si existe); nunca se guardan en el repositorio.
+[ -f "$ROOT/.env" ] && { set -a; source "$ROOT/.env"; set +a; }
 source /opt/intel/oneapi/setvars.sh >/dev/null 2>&1 || true
 export OMP_NUM_THREADS=16 OMP_PROC_BIND=close OMP_PLACES=cores
 unset JORO_ERA5_DIR JORO_ERA5_NONSTRICT JORO_UNLOCK_EVALUATION JORO_UNLOCK_PHASE5 JORO_ALLOW_CPU_FALLBACK JORO_SA_CHAINS JORO_SA_ITERS

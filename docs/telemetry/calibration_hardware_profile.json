@@ -1,12 +1,12 @@
 {
   "schema": "joro-hpc/calibration_hardware_profile/v1",
-  "generated": "2026-10-19 20:07:11",
+  "generated": "2026-10-19 21:31:16",
   "platform": {
     "lpdm_device": "Intel(R) Arc(TM) A380 Graphics | Intel(R) oneAPI Unified Runtime over Level-Zero | GPU",
     "cpu": "11th Gen Intel(R) Core(TM) i9-11900K @ 3.50GHz",
     "omp_threads": 16,
     "kernel": "7.2.9-1-default",
-    "compiler": "Intel(R) oneAPI DPC++/C++ Compiler 2026.1.1 (2026.1.1.20260724)",
+    "compiler": "icpx (versión no disponible en este entorno)",
     "compile_flags": "-O3 -fsycl -qopenmp -march=rocketlake -std=c++20"
   },
   "evaluations_per_model": 2000,

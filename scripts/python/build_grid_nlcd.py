@@ -16,6 +16,7 @@ import numpy as np
 import geopandas as gpd
 from shapely.geometry import box
 from sqlalchemy import create_engine, text
+from joro_db import get_db_url
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
@@ -140,7 +141,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--db-url",
-        default="postgresql://joro_admin:REDACTED_DB_PASSWORD@localhost:5433/joro_db",
+        default=get_db_url(require_password=False),
         help="Cadena de conexión PostgreSQL (Puerto oficial: 5433)",
     )
     parser.add_argument(

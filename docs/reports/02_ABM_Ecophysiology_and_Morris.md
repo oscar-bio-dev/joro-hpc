@@ -50,7 +50,7 @@ con el índice de hábitat ortogonalizado $H_i^{\text{hab}} = \operatorname{std}
 
 ## 3. Cribado global de sensibilidad de Morris (1991)
 
-Diseño: $k$ = 11 parámetros, $r$ = 10 trayectorias aleatorias, $p$ = 4 niveles, 120 evaluaciones del modelo acoplado (3.92 s en total). Salidas: población adulta final y radio del frente de invasión.
+Diseño: $k$ = 11 parámetros, $r$ = 10 trayectorias aleatorias, $p$ = 4 niveles, 120 evaluaciones del modelo acoplado (4.35 s en total). Salidas: población adulta final y radio del frente de invasión.
 
 ### Tabla 1: Índices $\mu^*$ y $\sigma$
 
@@ -79,12 +79,72 @@ Diseño: $k$ = 11 parámetros, $r$ = 10 trayectorias aleatorias, $p$ = 4 niveles
 
 ## 4. Diagnósticos de saturación y transecto latitudinal (`--transect`)
 
-> [!WARNING]
-> **Estos diagnósticos no se usan como resultados de este informe.**
-> - La *Tabla 2* del transecto (30–44 °N: $T_{\min}$, daño $D$, supervivencia, persistencia) está **escrita como valores fijos en el código** (`src/main.cpp`); no se calcula con el ABM ni con ERA5. El simulador la rotula ahora como «escenario de referencia prescrito».
-> - La *Tabla 1* (saturación $N/K$ en el epicentro) se calcula con el ABM, pero en la versión actual devuelve 0 adultas en la celda testigo seleccionada, por lo que no es informativa.
->
-> Sustituirlos por un experimento real (cohortes testigo por latitud con el forzamiento térmico diario y las funciones de daño del ABM) queda como trabajo pendiente (véase `docs/RUNBOOK.md`, «Problemas conocidos»). La evidencia de la restricción térmica septentrional en este repositorio es la **validación fuera de muestra** (informe 04: 0.00 % de falsos positivos al norte de 38 °N frente a 9.33 % del SDM estático), no el transecto.
+Ambos experimentos se simulan con el ABM real (`step_spring_phenology` y `step_summer_autumn_phenology`) y con la serie térmica diaria ERA5 **de cada año** 2014–2019 (modo estricto: sin climatología de respaldo). Todas las cifras se imprimen desde `joro_hpc --diagnostics --engine=gpu` (registro en `logs/diagnostics.log`); ninguna está escrita en el código. Usan el conjunto **nominal** de parámetros demográficos del ABM (`DemographicParameters` por defecto: $T_c$ = −4 °C, $\alpha$ = 0.04, $\beta$ = 2, $F$ = 450, $q_{\text{viab}}$ = 0.65, $q_{\text{balloon}}$ = 0.35, $K_0$ = 5000 con $\gamma_1$–$\gamma_3$ nominales), **no** los estimadores calibrados $\Theta_{\text{comp}}$.
+
+### Tabla 2: Saturación y crecimiento en el epicentro (celda semilla activa, ABM acoplado al LPDM)
+
+La celda testigo es la celda **semilla** más cercana a (34.25 °N, −83.50 °E) (`is_seed == true`). Celda 106645 (34.248°N, -83.519°E) | K_i efectiva = 45965.
+
+| Año | $N_{i,t}$ adultas | $K_i$ | $N/K$ | Supervivencia invernal | Propágulos aéreos | Estado |
+|---|---|---|---|---|---|---|
+| 2014 | 0 | 45964 | 0.0 % | 0.0 % | 0 | SIN ADULTAS |
+| 2015 | 0 | 45964 | 0.0 % | 1.3 % | 0 | SIN ADULTAS |
+| 2016 | 50 | 45964 | 0.1 % | 83.1 % | 13 | Crecimiento |
+| 2017 | 7436 | 45964 | 16.2 % | 85.7 % | 2907 | Crecimiento |
+| 2018 | 3124 | 45964 | 6.8 % | 7.9 % | 1195 | Crecimiento |
+| 2019 | 37781 | 45964 | 82.2 % | 100.0 % | 15250 | Crecimiento |
+
+La supervivencia invernal es la de las ootecas de la propia celda (no un agregado continental). La celda semilla pierde casi toda su cohorte inicial en los inviernos de 2014 y 2015 y se repuebla con llegadas del LPDM desde las demás celdas semilla; la saturación $N/K$ alcanza 82.2% en 2019 sin llegar al umbral de 0.85, por lo que la curva de saturación Beverton–Holt todavía está en la fase de crecimiento al terminar la ventana.
+
+### Tabla 3: Celda testigo B (NC/VA, ≈ 37 °N, cohorte de 1,000 ootecas inyectada en 2014)
+
+Celda 142360 (36.980°N, -78.984°E) | K_i efectiva = 21182.
+
+| Año | $N_{i,t}$ adultas | $K_i$ | $N/K$ | Supervivencia invernal | Propágulos aéreos | Estado |
+|---|---|---|---|---|---|---|
+| 2014 | 0 | 21181 | 0.0 % | 0.0 % | — | SIN ADULTAS |
+| 2015 | 0 | 21181 | 0.0 % | — (sin ootecas) | — | SIN ADULTAS |
+| 2016 | 0 | 21181 | 0.0 % | — (sin ootecas) | — | SIN ADULTAS |
+| 2017 | 0 | 21181 | 0.0 % | — (sin ootecas) | — | SIN ADULTAS |
+| 2018 | 0 | 21181 | 0.0 % | — (sin ootecas) | — | SIN ADULTAS |
+| 2019 | 0 | 21181 | 0.0 % | — (sin ootecas) | — | SIN ADULTAS |
+
+La cohorte inyectada en 2014 no sobrevive a ese invierno y la celda no es recolonizada en 2015–2019: el ABM con parámetros nominales y ERA5 no sostiene población a esta latitud en la ventana de calibración.
+
+### Tabla 4: Gradiente latitudinal sur–norte (30–44 °N), celdas reales y cohorte estandarizada de 1,000 ootecas
+
+Cada fila es una celda real de `grid_5km` (la más cercana a la latitud y longitud de referencia); las celdas se simulan **aisladas** (sin LPDM: los propágulos aéreos emigran sin reposición), de modo que el gradiente refleja la barrera térmica local y no la dispersión.
+
+| Latitud | Celda | Zona | $T_{\min}$ media inv. (°C) | $T_{\min}$ extrema (°C) | $\overline{D}_{j,t}$ | Supervivencia de ootecas | Adultas 2019 | Persistencia ($\ge 2$ años) |
+|---|---|---|---|---|---|---|---|---|
+| 30.0°N | 117596 | FL norte / GA sur | 9.6 | -5.1 | 0.01 | 99.1 % | 14829 | PERSISTENTE |
+| 32.0°N | 110109 | Georgia central | 7.2 | -9.3 | 0.38 | 75.2 % | 10484 | PERSISTENTE |
+| 34.0°N | 107142 | NE Georgia (epicentro) | 4.7 | -13.9 | 2.53 | 49.9 % | 19745 | PERSISTENTE |
+| 36.5°N | 129795 | Carolina del Norte | 0.9 | -17.5 | 26.92 | 0.0 % | 0 | FALLIDA |
+| 38.0°N | 140374 | Virginia (Apalaches) | -1.2 | -25.8 | 63.25 | 0.0 % | 0 | FALLIDA |
+| 40.0°N | 148957 | Pensilvania central | -3.0 | -23.1 | 107.40 | 0.0 % | 0 | FALLIDA |
+| 42.0°N | 152518 | Nueva York (S. Tier) | -6.3 | -26.7 | 295.61 | 0.0 % | 0 | FALLIDA |
+| 44.0°N | 156080 | N. York (St. Lawrence) | -9.5 | -35.1 | 418.37 | 0.0 % | 0 | FALLIDA |
+
+- $T_{\min}$: `t2m_min` ERA5 en enero–marzo (media de las medias anuales 2014–2019; la extrema es el mínimo diario del periodo), sin amortiguación de dosel.
+- $\overline{D}_{j,t}$: daño acumulado de la cohorte invernante (otoño previo + invierno), media de los años con cohorte viva.
+- Supervivencia de ootecas: media de $\sum w_0 e^{-\Delta D}/\sum w_0$ en los años con cohorte viva. Persistencia: ≥ 2 años consecutivos con ≥ 1 adulta.
+
+Serie anual de adultas por celda (otoño de 2014 a 2019):
+
+```text
+     30.0°N:       652     12777     14815     14831     14229     14829
+     32.0°N:       191      4152     10367     10125      6942     10484
+     34.0°N:         0         0        54      5546      3144     19745
+     36.5°N:         0         0         0         0         0         0
+     38.0°N:         0         0         0         0         0         0
+     40.0°N:         0         0         0         0         0         0
+     42.0°N:         0         0         0         0         0         0
+     44.0°N:         0         0         0         0         0         0
+```
+
+> [!IMPORTANT]
+> Con los parámetros nominales, la persistencia solo se sostiene hasta ≈ 34 °N; desde 36.5 °N todas las celdas fracasan. Esto contrasta con la expansión observada más al norte (informe 04), de modo que el conjunto nominal es **demasiado severo** (o el $T_{\min}$ ERA5 sin dosel sobreestima el daño). Es un resultado del experimento, no un valor ajustado; la comparación con las observaciones debe hacerse con $\Theta_{\text{comp}}$ y se deja como trabajo futuro.
 
 ---
 
@@ -98,7 +158,7 @@ Diseño: $k$ = 11 parámetros, $r$ = 10 trayectorias aleatorias, $p$ = 4 niveles
 
 - $r$ = 10 trayectorias de Morris: jerarquización cualitativa.
 - Los índices dependen del rango de cada prior; los rangos son cotas físicas, no distribuciones.
-- Transecto latitudinal pendiente de implementación real (sección 4).
+- El transecto (sección 4) usa parámetros demográficos nominales, cohortes aisladas y una sola semilla de RNG; no está contrastado con observaciones.
 
 ## 7. Reproducción
 
@@ -106,5 +166,5 @@ Diseño: $k$ = 11 parámetros, $r$ = 10 trayectorias aleatorias, $p$ = 4 niveles
 source /opt/intel/oneapi/setvars.sh
 cmake -S . -B build && cmake --build build -j
 ./build/test_parameter_recovery
-./build/joro_hpc --engine=gpu --morris --no-calibration     # ciclo continental de humo + cribado de Morris
+./build/joro_hpc --diagnostics --engine=gpu     # transecto (--transect) + cribado de Morris (--morris)
 ```

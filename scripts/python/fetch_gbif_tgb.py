@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Tuple
 import requests
 import psycopg2
 from psycopg2.extras import execute_batch
+from joro_db import get_db_url
 
 logging.basicConfig(
     level=logging.INFO,
@@ -335,7 +336,7 @@ def main() -> int:
     parser.add_argument(
         "--db-url",
         type=str,
-        default="postgresql://joro_admin:REDACTED_DB_PASSWORD@localhost:5433/joro_db",
+        default=get_db_url(require_password=False),
         help="Cadena de conexión a PostgreSQL",
     )
     args = parser.parse_args()

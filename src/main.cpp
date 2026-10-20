@@ -148,11 +148,88 @@ RunSummary execute_continental_cycle(
     return summary;
 }
 
-/// Ejecuta el Experimento de Transecto Latitudinal y Saturación (Tarea 3)
+/// Celda de la malla más cercana a (lat, lon) (distancia equirectangular en grados).
+/// Con `seed_only` restringe la búsqueda a las celdas del polígono semilla activo (is_seed).
+static const joro::GridCell* nearest_cell(const std::vector<joro::GridCell>& cells,
+                                          float lat, float lon, bool seed_only) {
+    const joro::GridCell* best = nullptr;
+    double best_d = 1e30;
+    const double kc = std::cos(static_cast<double>(lat) * 3.14159265358979323846 / 180.0);
+    for (const auto& c : cells) {
+        if (seed_only && !c.is_seed) continue;
+        const double dy = static_cast<double>(c.centroid_lat) - lat;
+        const double dx = (static_cast<double>(c.centroid_lon) - lon) * kc;
+        const double d = dx * dx + dy * dy;
+        if (d < best_d) { best_d = d; best = &c; }
+    }
+    return best;
+}
+
+/// Instantánea de las ootecas (estadio 0) vivas de una celda ANTES de la fase primaveral.
+/// El motor ABM conserva el orden de las cohortes durante el paso primaveral, por lo que los
+/// índices guardados siguen siendo válidos al leer el estado posterior (sin reimplementar el ABM).
+struct OothecaSnapshot {
+    std::vector<size_t> idx;
+    std::vector<float> w0;
+    std::vector<float> d0;
+};
+
+static OothecaSnapshot snapshot_oothecae(const joro::abm::CohortSoA& co, int32_t cell_id) {
+    OothecaSnapshot s;
+    for (size_t i = 0; i < co.size(); ++i) {
+        if (co.cell_id[i] == cell_id && co.stage[i] == 0 && co.is_alive[i]) {
+            s.idx.push_back(i);
+            s.w0.push_back(co.weight[i]);
+            s.d0.push_back(co.cold_damage_D[i]);
+        }
+    }
+    return s;
+}
+
+/// Resultado del paso invernal de una celda, leído del estado real del ABM tras `step_spring_phenology`.
+struct WinterOutcome {
+    bool had_cohort = false;
+    double survival_pct = 0.0;  ///< Σ w0·S_i / Σ w0 con S_i = exp(-ΔD_i) (0 si w0·S_i < umbral de extinción de cohorte)
+    double mean_damage = 0.0;   ///< D_{j,t} acumulado (otoño previo + invierno) ponderado por w0
+};
+
+static WinterOutcome winter_outcome(const joro::abm::CohortSoA& co, const OothecaSnapshot& s) {
+    WinterOutcome o;
+    double w_tot = 0.0, w_surv = 0.0, d_w = 0.0;
+    for (size_t k = 0; k < s.idx.size(); ++k) {
+        const size_t i = s.idx[k];
+        const double dd = static_cast<double>(co.cold_damage_D[i]) - s.d0[k];
+        const double surv = std::exp(-dd);
+        const bool alive = (static_cast<double>(s.w0[k]) * surv) >= 0.005;  // mismo umbral que el ABM
+        w_tot += s.w0[k];
+        w_surv += alive ? s.w0[k] * surv : 0.0;
+        d_w += static_cast<double>(s.w0[k]) * co.cold_damage_D[i];
+    }
+    if (w_tot > 0.0) {
+        o.had_cohort = true;
+        o.survival_pct = 100.0 * w_surv / w_tot;
+        o.mean_damage = d_w / w_tot;
+    }
+    return o;
+}
+
+/// Capacidad de carga efectiva K_i con los parámetros demográficos vigentes del motor ABM.
+static float effective_k(const joro::abm::AbmEngine& abm, const joro::GridCell& cell) {
+    const auto& p = abm.params();
+    joro::abm::CarryingCapacityParams cc{p.k0, p.gamma1_imp, p.gamma2_borde, p.gamma3_dosel, p.k_min, p.k_max};
+    cc.gamma_hab = p.gamma_hab;
+    cc.use_hab_index = p.use_hab_index;
+    return joro::abm::compute_carrying_capacity(cell, cc);
+}
+
+/// Experimento de Transecto Latitudinal y Saturación: simulación REAL del ABM (2014–2019) con forzamiento
+/// térmico diario ERA5 por año. Sin valores prescritos: toda cifra impresa se calcula en esta función.
+///   Tabla 1/1b: epicentro (celda semilla activa) y celda testigo B, acoplados al LPDM (dinámica continental).
+///   Tabla 2: ocho celdas reales (30–44 °N) aisladas (sin LPDM), cada una con una cohorte estandarizada de
+///            1,000 ootecas; los propágulos aéreos emigran y no se reponen (barrera local pura).
 void execute_latitudinal_transect_experiment(
     const std::vector<joro::GridCell>& grid_cells,
-    const joro::io::DailyThermalGrid& thermal,
-    const joro::io::AtmosphericField3D& atmosphere,
+    joro::io::Era5NetCdfReader& era5_reader,
     joro::lpdm::LpdmEngine* engine,
     const joro::SimulationConfig& config)
 {
@@ -160,151 +237,218 @@ void execute_latitudinal_transect_experiment(
     std::cout << "║    EXPERIMENTO DE GRADIENTE LATITUDINAL Y SATURACIÓN DEMOGRÁFICA (2014–2019)                   ║\n";
     std::cout << "╚═══════════════════════════════════════════════════════════════════════════════════════════════╝\n";
 
+    // Forzamiento exclusivamente real: sin serie térmica ERA5 del año no hay resultado (sin climatología de respaldo).
+    era5_reader.set_strict(true);
+    const int y0 = config.calib_start_year, y1 = config.calib_end_year;
+    std::vector<joro::io::DailyThermalGrid> thermals(static_cast<size_t>(y1 - y0 + 1));
+    for (int y = y0; y <= y1; ++y) {
+        if (!era5_reader.load_daily_thermal_year(y, thermals[static_cast<size_t>(y - y0)])) {
+            std::cerr << "[Transecto] ERROR: serie térmica diaria ERA5 real de " << y
+                      << " no disponible; experimento abortado (no se usan valores de respaldo).\n";
+            return;
+        }
+    }
+    constexpr int kWinterDays = 90;            // enero–marzo: ventana de daño invernal del ABM
+    constexpr float kStdCohort = 1000.0f;      // ootecas inyectadas por celda testigo
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Parte A: epicentro (semilla activa) + celda testigo B, ABM acoplado al LPDM
+    // ─────────────────────────────────────────────────────────────────────────
+    const joro::GridCell* cell_a = nearest_cell(grid_cells, 34.25f, -83.50f, /*seed_only=*/true);
+    const joro::GridCell* cell_b = nearest_cell(grid_cells, 37.00f, -79.00f, /*seed_only=*/false);
+    if (!cell_a || !cell_b) {
+        std::cerr << "[Transecto] ERROR: no se encontraron celdas testigo (¿malla vacía o sin celdas semilla?).\n";
+        return;
+    }
+
     joro::abm::AbmEngine abm_engine;
     abm_engine.initialize_seed(grid_cells, 0.15f);
+    abm_engine.inject_test_cohort(cell_b->cell_id, kStdCohort);   // cohorte testigo explícita en B
+    const float k_a = effective_k(abm_engine, *cell_a);
+    const float k_b = effective_k(abm_engine, *cell_b);
 
-    // Identificar celdas clave de las tres zonas testigo
-    int32_t cell_zone_a = -1; // Epicentro Georgia (~34.25°N, -83.5°W)
-    int32_t cell_zone_b = -1; // Frente Transición NC/VA (~37.0°N, -79.0°W)
-    int32_t cell_zone_c = -1; // Barrera Térmica Norte NY/PA (~42.0°N, -76.5°W)
-
-    float min_dist_a = 999.0f, min_dist_b = 999.0f, min_dist_c = 999.0f;
-    for (const auto& c : grid_cells) {
-        float d_a = std::hypot(c.centroid_lat - 34.25f, c.centroid_lon - (-83.50f));
-        if (d_a < min_dist_a) { min_dist_a = d_a; cell_zone_a = c.cell_id; }
-
-        float d_b = std::hypot(c.centroid_lat - 37.00f, c.centroid_lon - (-79.00f));
-        if (d_b < min_dist_b) { min_dist_b = d_b; cell_zone_b = c.cell_id; }
-
-        float d_c = std::hypot(c.centroid_lat - 42.00f, c.centroid_lon - (-76.50f));
-        if (d_c < min_dist_c) { min_dist_c = d_c; cell_zone_c = c.cell_id; }
-    }
-
-    // Inyectar cohorte de prueba en Zona C (1,000 ootecas) para evaluar daño acumulado y persistencia
-    abm_engine.inject_test_cohort(cell_zone_c, 1000.0f);
-
-    joro::abm::CarryingCapacityParams cc_nominal{
-        5000.0f, 0.45f, 0.65f, 0.30f, 100.0f, 50000.0f
+    struct CoupledRecord {
+        int year = 0;
+        float adults_a = 0, sat_a = 0, surv_a = 0;
+        bool had_a = false, had_b = false;
+        uint32_t balloon_a = 0;
+        float adults_b = 0, sat_b = 0, surv_b = 0;
+        uint64_t total_adults = 0;
     };
-    float k_eff_a = 5000.0f, k_eff_b = 4500.0f;
-    for (const auto& c : grid_cells) {
-        if (c.cell_id == cell_zone_a) k_eff_a = joro::abm::compute_carrying_capacity(c, cc_nominal);
-        if (c.cell_id == cell_zone_b) k_eff_b = joro::abm::compute_carrying_capacity(c, cc_nominal);
-    }
+    std::vector<CoupledRecord> coupled;
 
-    struct YearPhenologyRecord {
-        int year;
-        float adults_a;
-        float k_a;
-        float sat_a;
-        float winter_surv_a;
-        uint32_t ballooners_a;
-        float adults_b;
-        float sat_b;
-        float winter_surv_b;
-        float adults_c;
-        float winter_surv_c;
-        float damage_c;
-    };
+    for (int year = y0; year <= y1; ++year) {
+        const auto& thermal = thermals[static_cast<size_t>(year - y0)];
+        joro::io::AtmosphericField3D atmosphere;
+        if (!era5_reader.load_month(year, 5, atmosphere)) {
+            std::cerr << "[Transecto] ERROR: tensor atmosférico ERA5 de " << year << "-05 no disponible.\n";
+            return;
+        }
+        const auto snap_a = snapshot_oothecae(abm_engine.cohorts(), cell_a->cell_id);
+        const auto snap_b = snapshot_oothecae(abm_engine.cohorts(), cell_b->cell_id);
 
-    std::vector<YearPhenologyRecord> records;
-
-    for (int year = config.calib_start_year; year <= config.calib_end_year; ++year) {
-        YearPhenologyRecord rec;
-        rec.year = year;
-
-        // Fase Primaveral (Días 1 a 120: daño invernal previo, emergencia y baloneo)
         auto spring = abm_engine.step_spring_phenology(grid_cells, thermal, year);
+        const auto wo_a = winter_outcome(abm_engine.cohorts(), snap_a);
+        const auto wo_b = winter_outcome(abm_engine.cohorts(), snap_b);
 
-        // LPDM Dispersión
         engine->initialize_particles(grid_cells, spring.ballooners_per_cell);
-        int steps = std::min(168, std::max(60, atmosphere.n_times));
+        const int steps = std::min(168, std::max(60, atmosphere.n_times));
         auto disp = engine->run_dispersion(atmosphere, static_cast<float>(config.lpdm_dt_seconds), steps);
         abm_engine.deposit_arrivals(disp.arrivals_per_cell);
 
-        // Fase Estival/Otoñal (Días 121 a 365: desarrollo Q10, reproducción Ki, daño invernal temprano)
         auto fall = abm_engine.step_summer_autumn_phenology(grid_cells, thermal, year);
 
-        // Métricas Zona A (Saturación reportada respecto al K_i efectivo)
-        rec.adults_a = fall.adult_density_per_cell[cell_zone_a];
-        rec.k_a = k_eff_a;
-        rec.sat_a = rec.adults_a / rec.k_a;
-        rec.winter_surv_a = spring.winter_survival_pct;
-        rec.ballooners_a = spring.ballooners_per_cell[cell_zone_a];
-
-        // Métricas Zona B
-        rec.adults_b = fall.adult_density_per_cell[cell_zone_b];
-        rec.sat_b = rec.adults_b / k_eff_b;
-        rec.winter_surv_b = std::max(0.0f, spring.winter_survival_pct - 38.0f);
-
-        // Métricas Zona C (Barrera Norte)
-        rec.adults_c = fall.adult_density_per_cell[cell_zone_c];
-        rec.winter_surv_c = 0.0f; // Exterminada por heladas polares
-        rec.damage_c = 14.8f;
-
-        records.push_back(rec);
+        CoupledRecord r;
+        r.year = year;
+        auto ia = fall.adult_density_per_cell.find(cell_a->cell_id);
+        auto ib = fall.adult_density_per_cell.find(cell_b->cell_id);
+        r.adults_a = (ia != fall.adult_density_per_cell.end()) ? ia->second : 0.0f;
+        r.adults_b = (ib != fall.adult_density_per_cell.end()) ? ib->second : 0.0f;
+        r.sat_a = r.adults_a / k_a;
+        r.sat_b = r.adults_b / k_b;
+        r.surv_a = static_cast<float>(wo_a.survival_pct);
+        r.had_a = wo_a.had_cohort;
+        r.had_b = wo_b.had_cohort;
+        r.surv_b = static_cast<float>(wo_b.survival_pct);
+        auto ba = spring.ballooners_per_cell.find(cell_a->cell_id);
+        r.balloon_a = (ba != spring.ballooners_per_cell.end()) ? ba->second : 0u;
+        r.total_adults = fall.total_adults;
+        coupled.push_back(r);
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // TABLA 1: EVOLUCIÓN FENOLÓGICA Y SATURACIÓN EN EL EPICENTRO (GEORGIA)
-    // ─────────────────────────────────────────────────────────────────────────
-    std::cout << "\nTABLA 1: EVOLUCIÓN FENOLÓGICA Y SATURACIÓN (N_{i,t}/K_i) EN EPICENTRO (NE GEORGIA):\n";
-    std::cout << "┌──────┬──────────────┬──────────────┬──────────┬──────────────┬──────────────┬──────────────────┐\n";
-    std::cout << "│ Año  │ N_adultas    │ Capacidad Ki │ N/K (%)  │ Superv. Inv. │ Baloneo Aéreo│ Estado Población │\n";
-    std::cout << "├──────┼──────────────┼──────────────┼──────────┼──────────────┼──────────────┼──────────────────┤\n";
-    for (const auto& r : records) {
-        std::string status = (r.sat_a >= 0.85f) ? "SATURADA (>0.85) ✔" : "Crecimiento Rápido";
-        std::cout << "│ " << r.year << " │ "
-                  << std::setw(12) << static_cast<uint64_t>(r.adults_a) << " │ "
-                  << std::setw(12) << static_cast<uint64_t>(r.k_a) << " │ "
-                  << std::setw(7) << std::fixed << std::setprecision(1) << (r.sat_a * 100.0f) << "% │ "
-                  << std::setw(11) << std::fixed << std::setprecision(1) << r.winter_surv_a << "% │ "
-                  << std::setw(12) << r.ballooners_a << " │ "
-                  << std::setw(16) << status << " │\n";
-    }
-    std::cout << "└──────┴──────────────┴──────────────┴──────────┴──────────────┴──────────────┴──────────────────┘\n";
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // TABLA 2: GRADIENTE LATITUDINAL SUR-NORTE (30°N A 44°N)
-    // ─────────────────────────────────────────────────────────────────────────
-    std::cout << "\nTABLA 2: TRANSECTO LATITUDINAL SUR-NORTE — ESCENARIO DE REFERENCIA PRESCRITO (valores fijos del código, NO es salida de simulación):\n";
-    std::cout << "┌─────────┬──────────────────────────────┬──────────────┬──────────────┬──────────────┬──────────────┬─────────────────────┐\n";
-    std::cout << "│ Latitud │ Zona Geográfica Testigo      │ Tmin Med Inv │ Tmin Extrema │ Daño D_jt    │ Superv. Oot. │ Persistencia 2 Años │\n";
-    std::cout << "├─────────┼──────────────────────────────┼──────────────┼──────────────┼──────────────┼──────────────┼─────────────────────┤\n";
-
-    // AVISO: esta tabla es un escenario de referencia con valores fijos; no se calcula con el ABM ni con ERA5.
-    // No debe citarse como resultado. Ver docs/RUNBOOK.md (sección "Problemas conocidos").
-    struct LatPoint {
-        float lat;
-        std::string name;
-        float tmin_mean;
-        float tmin_ext;
-        float damage_d;
-        float surv_pct;
-        std::string persist;
+    auto print_saturation_table = [&](const char* title, const joro::GridCell& cell, float k, bool zone_a) {
+        std::cout << "\n" << title << "\n";
+        std::cout << "  Celda " << cell.cell_id << " (" << std::fixed << std::setprecision(3) << cell.centroid_lat
+                  << "°N, " << cell.centroid_lon << "°E) | K_i efectiva = " << std::setprecision(0) << k << "\n";
+        std::cout << "┌──────┬──────────────┬──────────────┬──────────┬──────────────┬──────────────┬──────────────────────┐\n";
+        std::cout << "│ Año  │ N_adultas    │ Capacidad Ki │ N/K (%)  │ Superv. Inv. │ Baloneo Aéreo│ Estado Población     │\n";
+        std::cout << "├──────┼──────────────┼──────────────┼──────────┼──────────────┼──────────────┼──────────────────────┤\n";
+        for (const auto& r : coupled) {
+            const float n = zone_a ? r.adults_a : r.adults_b;
+            const float sat = zone_a ? r.sat_a : r.sat_b;
+            const float surv = zone_a ? r.surv_a : r.surv_b;
+            const bool had = zone_a ? r.had_a : r.had_b;
+            const std::string status = (n < 1.0f) ? "SIN ADULTAS"
+                                     : (sat >= 0.85f) ? "SATURADA (>0.85)" : "Crecimiento";
+            std::cout << "│ " << r.year << " │ "
+                      << std::setw(12) << static_cast<uint64_t>(n) << " │ "
+                      << std::setw(12) << static_cast<uint64_t>(k) << " │ "
+                      << std::setw(7) << std::fixed << std::setprecision(1) << (sat * 100.0f) << "% │ "
+                      ;
+            if (had) std::cout << std::setw(11) << std::fixed << std::setprecision(1) << surv << "% │ ";
+            else     std::cout << std::setw(12) << "-" << " │ ";
+            if (zone_a) std::cout << std::setw(12) << r.balloon_a << " │ ";
+            else        std::cout << std::setw(12) << "-" << " │ ";
+            std::cout << std::left << std::setw(20) << status << std::right << " │\n";
+        }
+        std::cout << "└──────┴──────────────┴──────────────┴──────────┴──────────────┴──────────────┴──────────────────────┘\n";
     };
+    print_saturation_table("TABLA 1: EVOLUCIÓN FENOLÓGICA Y SATURACIÓN (N_{i,t}/K_i) EN EL EPICENTRO (celda semilla activa, ABM+LPDM acoplados):",
+                           *cell_a, k_a, true);
+    print_saturation_table("TABLA 1b: CELDA TESTIGO B (NC/VA, ~37°N; cohorte de 1,000 ootecas inyectada en 2014, ABM+LPDM acoplados):",
+                           *cell_b, k_b, false);
 
-    std::vector<LatPoint> transect = {
-        {30.0f, "Florida Norte / S. Georgia",    5.4f,   -1.8f,   0.02f, 98.0f, "PERSISTENTE ✔"},
-        {32.0f, "Georgia Central (Macon)",        3.1f,   -4.5f,   0.12f, 88.7f, "PERSISTENTE ✔"},
-        {34.0f, "Zona A: Epicentro (Athens, GA)", 0.8f,   -7.5f,   0.28f, 75.6f, "PERSISTENTE ✔"},
-        {36.5f, "Carolina del Norte (Piedmont)", -2.1f,  -12.0f,   1.15f, 31.7f, "PERSISTENTE ✔"},
-        {38.0f, "Zona B: Virginia / D.C.",       -4.5f,  -15.5f,   2.65f,  7.1f, "MARGINAL / INCIERTA"},
-        {40.0f, "Pensilvania Central",           -7.2f,  -19.0f,   6.80f,  0.1f, "FALLIDA (Extinción) ✖"},
-        {42.0f, "Zona C: N. York / Hudson Val",  -9.5f,  -23.2f,  14.80f,  0.0f, "BARRERA TÉRMICA ✖"},
-        {44.0f, "Grandes Lagos / Adirondacks",  -13.8f,  -29.5f,  32.40f,  0.0f, "BARRERA TÉRMICA ✖"}
+    // ─────────────────────────────────────────────────────────────────────────
+    // Parte B: gradiente latitudinal en celdas reales (ABM aislado, cohorte estandarizada)
+    // ─────────────────────────────────────────────────────────────────────────
+    struct SiteSpec { float lat, lon; const char* name; };
+    const std::vector<SiteSpec> specs = {
+        {30.0f, -83.0f, "FL norte / GA sur"},
+        {32.0f, -83.5f, "Georgia central"},
+        {34.0f, -83.5f, "NE Georgia (epicentro)"},
+        {36.5f, -80.5f, "Carolina del Norte"},
+        {38.0f, -79.0f, "Virginia (Apalaches)"},
+        {40.0f, -77.5f, "Pensilvania central"},
+        {42.0f, -76.5f, "Nueva York (S. Tier)"},
+        {44.0f, -75.5f, "N. York (St. Lawrence)"}
     };
-
-    for (const auto& tp : transect) {
-        std::cout << "│ " << std::setw(6) << std::fixed << std::setprecision(1) << tp.lat << "°N │ "
-                  << std::left << std::setw(28) << tp.name << std::right << " │ "
-                  << std::setw(10) << std::fixed << std::setprecision(1) << tp.tmin_mean << " °C │ "
-                  << std::setw(10) << std::fixed << std::setprecision(1) << tp.tmin_ext << " °C │ "
-                  << std::setw(12) << std::fixed << std::setprecision(2) << tp.damage_d << " │ "
-                  << std::setw(11) << std::fixed << std::setprecision(1) << tp.surv_pct << "% │ "
-                  << std::setw(19) << tp.persist << " │\n";
+    struct SiteYear { double surv = 0, dmg = 0; bool had = false; float adults = 0; };
+    struct Site {
+        SiteSpec spec; const joro::GridCell* cell = nullptr;
+        std::vector<SiteYear> yrs;
+        double tmin_mean_sum = 0; float tmin_ext = 1e9f;
+    };
+    std::vector<Site> sites;
+    joro::abm::AbmEngine iso;                     // motor aislado: sin semilla continental ni LPDM
+    for (const auto& sp : specs) {
+        Site s; s.spec = sp; s.cell = nearest_cell(grid_cells, sp.lat, sp.lon, false);
+        if (!s.cell) { std::cerr << "[Transecto] ERROR: sin celda cercana a " << sp.lat << "°N.\n"; return; }
+        iso.inject_test_cohort(s.cell->cell_id, kStdCohort);
+        sites.push_back(std::move(s));
     }
-    std::cout << "└─────────┴──────────────────────────────┴──────────────┴──────────────┴──────────────┴──────────────┴─────────────────────┘\n";
+
+    for (int year = y0; year <= y1; ++year) {
+        const auto& thermal = thermals[static_cast<size_t>(year - y0)];
+        std::vector<OothecaSnapshot> snaps;
+        for (const auto& s : sites) snaps.push_back(snapshot_oothecae(iso.cohorts(), s.cell->cell_id));
+
+        iso.step_spring_phenology(grid_cells, thermal, year);
+        std::vector<WinterOutcome> outs;
+        for (size_t k = 0; k < sites.size(); ++k) outs.push_back(winter_outcome(iso.cohorts(), snaps[k]));
+
+        auto fall = iso.step_summer_autumn_phenology(grid_cells, thermal, year);
+
+        for (size_t k = 0; k < sites.size(); ++k) {
+            auto& s = sites[k];
+            SiteYear sy;
+            sy.had = outs[k].had_cohort;
+            sy.surv = outs[k].survival_pct;
+            sy.dmg = outs[k].mean_damage;
+            auto it = fall.adult_density_per_cell.find(s.cell->cell_id);
+            sy.adults = (it != fall.adult_density_per_cell.end()) ? it->second : 0.0f;
+            s.yrs.push_back(sy);
+
+            // Tmin invernal (ERA5 t2m_min, 2 m) sobre los 90 días de invierno en la celda
+            const size_t loc = thermal.locate(s.cell->centroid_lat, s.cell->centroid_lon);
+            const size_t stride = thermal.day_stride();
+            double acc = 0.0;
+            for (int d = 0; d < kWinterDays; ++d) {
+                const float t = thermal.t2m_min[static_cast<size_t>(d) * stride + loc];
+                acc += t;
+                s.tmin_ext = std::min(s.tmin_ext, t);
+            }
+            s.tmin_mean_sum += acc / kWinterDays;
+        }
+    }
+
+    std::cout << "\nTABLA 2: TRANSECTO LATITUDINAL SUR-NORTE — SIMULACIÓN ABM (cohorte estandarizada de "
+              << static_cast<int>(kStdCohort) << " ootecas por celda, forzamiento ERA5 diario " << y0 << "–" << y1 << "):\n";
+    std::cout << "┌─────────┬─────────┬──────────────────────────┬──────────────┬──────────────┬──────────────┬──────────────┬────────────┬──────────────────────┐\n";
+    std::cout << "│ Latitud │ Celda   │ Zona (celda real)        │ Tmin Med Inv │ Tmin Extrema │ Daño D_jt    │ Superv. Oot. │ Adultas'19 │ Persistencia (≥2 a.) │\n";
+    std::cout << "├─────────┼─────────┼──────────────────────────┼──────────────┼──────────────┼──────────────┼──────────────┼────────────┼──────────────────────┤\n";
+    for (const auto& s : sites) {
+        const int ny = static_cast<int>(s.yrs.size());
+        double surv_sum = 0.0, dmg_sum = 0.0; int n_with = 0;
+        int run = 0, best_run = 0;
+        for (const auto& sy : s.yrs) {
+            if (sy.had) { surv_sum += sy.surv; dmg_sum += sy.dmg; ++n_with; }
+            if (sy.adults >= 1.0f) { ++run; best_run = std::max(best_run, run); } else run = 0;
+        }
+        const double surv_m = n_with ? surv_sum / n_with : 0.0;
+        const double dmg_m = n_with ? dmg_sum / n_with : 0.0;
+        const std::string persist = (best_run >= 2) ? "PERSISTENTE"
+                                  : (best_run == 1) ? "MARGINAL (1 anio)" : "FALLIDA";
+        std::cout << "│ " << std::setw(6) << std::fixed << std::setprecision(1) << s.cell->centroid_lat << "°N │ "
+                  << std::setw(7) << s.cell->cell_id << " │ "
+                  << std::left << std::setw(24) << s.spec.name << std::right << " │ "
+                  << std::setw(10) << std::fixed << std::setprecision(1) << (s.tmin_mean_sum / ny) << " °C │ "
+                  << std::setw(10) << std::fixed << std::setprecision(1) << s.tmin_ext << " °C │ "
+                  << std::setw(12) << std::fixed << std::setprecision(2) << dmg_m << " │ "
+                  << std::setw(11) << std::fixed << std::setprecision(1) << surv_m << "% │ "
+                  << std::setw(10) << static_cast<uint64_t>(s.yrs.back().adults) << " │ "
+                  << std::left << std::setw(20) << persist << std::right << " │\n";
+    }
+    std::cout << "└─────────┴─────────┴──────────────────────────┴──────────────┴──────────────┴──────────────┴──────────────┴────────────┴──────────────────────┘\n";
+    std::cout << "  Notas: Tmin = t2m_min ERA5 en enero–marzo (media de años; extrema = mínimo diario del periodo, sin amortiguación de dosel).\n"
+                 "         D_jt = daño acumulado de la cohorte invernante (otoño previo + invierno), media 2014–2019 de los años con cohorte viva.\n"
+                 "         Superv. Oot. = media de Σ w0·exp(-ΔD)/Σ w0 en los años con cohorte viva. Persistencia: ≥2 años consecutivos con adultas ≥1.\n"
+                 "         Celdas aisladas: los propágulos aéreos emigran sin reposición (sin LPDM); el gradiente refleja barrera local, no dispersión.\n";
+    std::cout << "\n  Serie anual de adultas por celda (otoño):\n";
+    for (const auto& s : sites) {
+        std::cout << "    " << std::fixed << std::setprecision(1) << std::setw(5) << s.cell->centroid_lat << "°N:";
+        for (const auto& sy : s.yrs) std::cout << " " << std::setw(9) << static_cast<uint64_t>(sy.adults);
+        std::cout << "\n";
+    }
 }
 
 /// Resumen JSON de una calibración (insumo de scripts/python/generate_calibration_report.py)
@@ -490,7 +634,7 @@ int main(int argc, char* argv[]) {
     // 6. Ejecutar Experimento de Gradiente Latitudinal (Tarea 3)
     if (run_transect) {
         auto active_engine = (target_engine == "cpu") ? lpdm_cpu.get() : lpdm_gpu.get();
-        execute_latitudinal_transect_experiment(grid_cells, daily_thermal, atmosphere, active_engine, config);
+        execute_latitudinal_transect_experiment(grid_cells, era5_reader, active_engine, config);
     }
 
     // 7. Ejecutar Cribado de Sensibilidad de Morris (Tarea 4)

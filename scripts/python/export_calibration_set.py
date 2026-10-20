@@ -8,8 +8,9 @@ covariables de `grid_5km` o el esfuerzo TGB en `cell_annual_observations`.
 import sys
 
 import psycopg2
+from joro_db import get_db_url
 
-DB_URL = "postgresql://joro_admin:REDACTED_DB_PASSWORD@localhost:5433/joro_db"
+DB_URL = get_db_url()
 OUT = sys.argv[1] if len(sys.argv) > 1 else "/mnt/hpc_scratch/joro-hpc/calibration_set_2014_2019.csv"
 
 SQL = """

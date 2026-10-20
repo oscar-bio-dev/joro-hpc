@@ -1,10 +1,26 @@
 #pragma once
 
 #include "common/types.hpp"
+#include <cstdlib>
 #include <string>
 #include <vector>
 
 namespace joro {
+
+/// Lee una variable de entorno; devuelve `fallback` si no existe o está vacía.
+inline std::string env_or(const char* name, const std::string& fallback) {
+    const char* v = std::getenv(name);
+    return (v && *v) ? std::string(v) : fallback;
+}
+
+/// Lee un entero desde el entorno; devuelve `fallback` si no existe o no es válido.
+inline int env_int_or(const char* name, int fallback) {
+    const char* v = std::getenv(name);
+    if (!v || !*v) return fallback;
+    char* end = nullptr;
+    long x = std::strtol(v, &end, 10);
+    return (end && *end == 0) ? static_cast<int>(x) : fallback;
+}
 
 struct SimulationConfig {
     std::string project_name = "JORO-HPC";
@@ -29,12 +45,13 @@ struct SimulationConfig {
     std::string era5_dir = "/mnt/hpc_scratch/joro-hpc/era5_nc_active";
     double lpdm_dt_seconds = 60.0;
     
-    // PostgreSQL / PostGIS (puerto 5433 para evitar colisiones Docker)
-    std::string db_host = "localhost";
-    int db_port = 5433;
-    std::string db_name = "joro_db";
-    std::string db_user = "joro_admin";
-    std::string db_password = "REDACTED_DB_PASSWORD";
+    // PostgreSQL / PostGIS: parámetros leídos del entorno (ver `.env.example`).
+    // La contraseña NUNCA se almacena en el código: se lee de JORO_DB_PASSWORD (por defecto vacía).
+    std::string db_host = env_or("JORO_DB_HOST", "localhost");
+    int db_port = env_int_or("JORO_DB_PORT", 5433);
+    std::string db_name = env_or("JORO_DB_NAME", "joro_db");
+    std::string db_user = env_or("JORO_DB_USER", "joro_admin");
+    std::string db_password = env_or("JORO_DB_PASSWORD", "");
     std::string db_tablespace = "hpc_fast";
     
     // Parámetros de calibración por defecto

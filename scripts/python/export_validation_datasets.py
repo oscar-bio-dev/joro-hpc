@@ -7,8 +7,9 @@ Incluye ecoregion_block y todas las covariables necesarias.
 """
 import sys
 import psycopg2
+from joro_db import get_db_url
 
-DB_URL = "postgresql://joro_admin:REDACTED_DB_PASSWORD@localhost:5433/joro_db"
+DB_URL = get_db_url()
 CALIB_OUT = "/mnt/hpc_scratch/joro-hpc/calibration_set_2014_2019.csv"
 EVAL_OUT = "/mnt/hpc_scratch/joro-hpc/evaluation_set_2020_2024.csv"
 

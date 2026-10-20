@@ -24,12 +24,13 @@ from pathlib import Path
 
 import numpy as np
 import psycopg2
+from joro_db import get_db_url
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRATCH = Path("/mnt/hpc_scratch/joro-hpc")
 CK = SCRATCH / "checkpoints"
 ERA5 = SCRATCH / "era5_nc_active"
-DB_URL = "postgresql://joro_admin:REDACTED_DB_PASSWORD@localhost:5433/joro_db"
+DB_URL = get_db_url()
 MODELS = ["M1", "M0", "M3"]
 ENSEMBLE = {"M1": CK / "theta_compatible_ensemble.csv", "M0": CK / "theta_compatible_ensemble_M0.csv",
             "M3": CK / "theta_compatible_ensemble_M3.csv"}

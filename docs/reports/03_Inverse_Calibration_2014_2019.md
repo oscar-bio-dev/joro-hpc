@@ -1,6 +1,6 @@
 # JORO-HPC — Calibración inversa 2014–2019: datos, identificabilidad y ensamble de parámetros compatibles (Θ_comp)
 
-_Generado automáticamente el 2026-10-19 20:07 por `scripts/python/generate_calibration_report.py` a partir de los artefactos de la corrida. Los veredictos se calculan con reglas fijas._
+_Generado automáticamente el 2026-10-19 21:31 por `scripts/python/generate_calibration_report.py` a partir de los artefactos de la corrida. Los veredictos se calculan con reglas fijas._
 
 - Dispositivo LPDM: **Intel(R) Arc(TM) A380 Graphics | Intel(R) oneAPI Unified Runtime over Level-Zero | GPU**.
 - Hilos OpenMP: **16**. Evaluaciones por modelo: **2000** (5 cadenas × 400).
@@ -155,7 +155,7 @@ Mayores |ρ|: `gamma_hab`–`a0` = -0.96; `k0`–`a0` = +0.92; `k0`–`gamma_hab
 - Años de ERA5 abiertos por el simulador: **[2014, 2015, 2016, 2017, 2018, 2019]** → ninguno > 2019.
 - Solicitudes de lectura rechazadas por el guardia del lector: **0**.
 - `v_calibration_set` exporta solo 2014–2019; el calibrador lee únicamente `calibration_set_2014_2019.csv` y el binario aborta si encuentra una fila fuera de 2014–2019.
-- Búsqueda estática de lecturas SQL de `v_evaluation_set` en `scripts/`, `src/` y `tests/`: **1** (scripts/python/export_validation_datasets.py:30).
+- Búsqueda estática de lecturas SQL de `v_evaluation_set` en `scripts/`, `src/` y `tests/`: **1** (scripts/python/export_validation_datasets.py:31).
 - El motor de PostgreSQL no registra lecturas de vistas sin `pg_stat_statements`; la afirmación «0 lecturas» se apoya en las tres comprobaciones anteriores (código, CSV exportado y guardia del lector), no en un contador del servidor.
 - **Veredicto:** ✘ revisar.
 

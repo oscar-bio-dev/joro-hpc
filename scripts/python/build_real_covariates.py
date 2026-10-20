@@ -39,12 +39,13 @@ import numpy as np
 import psycopg2
 import requests
 from PIL import Image
+from joro_db import get_db_url
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("joro.covariates")
 
 Image.MAX_IMAGE_PIXELS = None
-DB_URL = "postgresql://joro_admin:REDACTED_DB_PASSWORD@localhost:5433/joro_db"
+DB_URL = get_db_url()
 WCS = "https://www.mrlc.gov/geoserver/mrlc_download/wcs"
 LAYERS = {
     "lc": "mrlc_download__NLCD_2019_Land_Cover_L48",
