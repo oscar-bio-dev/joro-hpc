@@ -11,8 +11,8 @@ seed = 42819              # Semilla RNG principal para reproducibilidad
 log_level = "INFO"
 
 [storage]
-# Infraestructura de almacenamiento HPC (Data Lake vs Scratch)
-datalake_root = "/mnt/ecotech_datalake"
+# Infraestructura de almacenamiento HPC (Repositorio compartido ERA5 + Scratch NVMe)
+datalake_root = "/mnt/hpc_scratch/shared_env/era5_conus_east"
 scratch_root = "/mnt/hpc_scratch/joro-hpc"
 
 [domain]

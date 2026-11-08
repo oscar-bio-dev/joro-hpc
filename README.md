@@ -185,15 +185,10 @@ joro-hpc/
 │   │   ├── 02_spatial_blocks.sql      # EPA Level III ecoregion blocks (2014-2019 vs 2020-2024)
 │   │   └── 03_seed_smoke_grid.sql     # Fast synthetic EPSG:5070 grid & Georgia seed generator (Smoke Test)
 │   └── python/
-│       ├── joro_db.py                 # PostGIS connection from JORO_DB_* environment variables
-│       ├── data_pipeline.py           # Main CLI orchestrator
-│       ├── generate_calibration_report.py / generate_validation_report.py  # reports 03 and 04 from run artifacts
-│       ├── generate_daily_thermal_forcing.py # 365-day ERA5 daily thermal forcing generator (NetCDF4)
-│       ├── fetch_gbif_tgb.py          # GBIF occurrences + Araneae TGB effort + iNat API
-│       ├── fetch_era5_3d.py           # CDS API downloader (12 levels 1000-700 hPa to NetCDF4)
-│       ├── build_grid_nlcd.py         # NLCD 30m & TIGER/Line aggregation to 5km grid
-│       ├── surrogate_emulator.py      # Plan B: Latin Hypercube (500 pts) + Gaussian Process
-│       └── requirements.txt
+│       ├── run_static_sdm.py          # Null Model H1: Static Bioclimatic SDM comparator
+│       ├── compute_validation_metrics.py # Out-of-sample statistical validation metrics (Brier, AUC, kinematics)
+│       ├── surrogate_emulator.py      # Gaussian Process (Matern 5/2) & Random Forest surrogate over LHS
+│       └── requirements.txt           # Scientific Python dependencies for statistical analysis
 ├── src/
 │   ├── main.cpp                       # `joro_hpc`: coupled simulation, calibration (`--calibrate`), transect (`--transect`) & Morris (`--morris`)
 │   ├── joro_evaluate.cpp              # `joro_evaluate`: frozen blind validation 2020–2024, null models, prevalence offset
@@ -284,8 +279,10 @@ ctest --test-dir build --output-on-failure
 ./build/joro_hpc --engine gpu --transect --morris
 
 # Inverse calibration 2014–2019 (legacy: --phase4) and blind validation 2020–2024
-bash scripts/run_calibration.sh
-JORO_UNLOCK_EVALUATION=1 ./build/joro_evaluate     # joro_evaluate sets the variable itself; see docs/RUNBOOK.md
+./build/joro_hpc --calibrate --engine=gpu --model M1
+./build/joro_evaluate                               # Evaluates frozen ensembles on 2020–2024
+python3 scripts/python/run_static_sdm.py            # Null model H1 comparator
+python3 scripts/python/compute_validation_metrics.py# Statistical validation metrics
 ```
 
 The step-by-step operating checklist is in [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
@@ -321,11 +318,7 @@ apptainer run --nv --bind /data:/data joro_hpc.sif ./build/joro_hpc
 To create clean release or submission `.zip` archives without local build binaries, datasets, or `.git` internal metadata:
 
 ```bash
-# Using Git native archive
 git archive --format=zip --output=joro-hpc-clean.zip HEAD
-
-# Or using the included packaging script
-./scripts/package_clean_zip.sh
 ```
 
 ---

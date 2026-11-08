@@ -36,6 +36,11 @@ joro_evaluate
 *.dbf
 *.prj
 *.cpg
+*.gpkg
+*.gpkg-shm
+*.gpkg-wal
+*.xlsx
+*.xls
 
 # ── Python ───────────────────────────────────────────────────────────────────
 __pycache__/
@@ -80,7 +85,22 @@ Makefile
 *.tar.bz2
 
 # ── Secretos / entorno local (usar .env.example como plantilla) ─────────────
-RUNBOOK.md
 .env
 .env.*
 !.env.example
+.cdsapirc
+*.pem
+*.key
+
+# ── Pipeline local de ingesta, telemetría y auditorías privadas ─────────────
+local_pipeline/
+docs/internal_audits/
+docs/reports/0[5-9]_*.md
+tmp/
+docs/tmp/
+*.log
+download_watchdog.log
+download_progress.json
+*_backup.*
+*.bak
+*.orig

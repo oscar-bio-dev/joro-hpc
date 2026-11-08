@@ -11,18 +11,24 @@ Covariables:
   - pop_density_h, road_density_r (Censo / TIGER)
   - log1p(effort_araneae) (Esfuerzo TGB)
 """
+
 import json
+import os
 import time
+from pathlib import Path
 import netCDF4 as nc
 import numpy as np
 import pandas as pd
 from sklearn.linear_model import LogisticRegression
 
-CALIB_CSV = "/mnt/hpc_scratch/joro-hpc/calibration_set_2014_2019.csv"
-EVAL_CSV = "/mnt/hpc_scratch/joro-hpc/evaluation_set_2020_2024.csv"
-OUT_CSV = "/mnt/hpc_scratch/joro-hpc/outputs/sdm_predictions_2020_2024.csv"
-OUT_COEF_JSON = "/mnt/hpc_scratch/joro-hpc/outputs/sdm_coefficients.json"
-ERA5_DIR = "/mnt/hpc_scratch/joro-hpc/era5_nc_active"
+_DEFAULT_DATA = "data" if Path("data").exists() else "/mnt/hpc_scratch/joro-hpc"
+DATA_DIR = os.environ.get("JORO_DATA_DIR", _DEFAULT_DATA)
+CALIB_CSV = f"{DATA_DIR}/calibration_set_2014_2019.csv"
+EVAL_CSV = f"{DATA_DIR}/evaluation_set_2020_2024.csv"
+OUT_CSV = f"{DATA_DIR}/outputs/sdm_predictions_2020_2024.csv"
+OUT_COEF_JSON = f"{DATA_DIR}/outputs/sdm_coefficients.json"
+ERA5_DIR = f"{DATA_DIR}/era5_nc_active"
+
 
 def load_thermal_climatology(year):
     nc_path = f"{ERA5_DIR}/era5_daily_t2m_{year}.nc"
@@ -34,6 +40,7 @@ def load_thermal_climatology(year):
     # Verano: días 151..243 (jun-ago)
     s_tmean = tmean[151:244].mean(axis=0)
     return w_tmin, s_tmean
+
 
 def map_thermal(df, years):
     lat = df["centroid_lat"].values
@@ -49,7 +56,7 @@ def map_thermal(df, years):
         thermal_by_year[y] = load_thermal_climatology(y)
 
     for y in years:
-        mask = (df["year"].values == y)
+        mask = df["year"].values == y
         w_grid, s_grid = thermal_by_year[y]
         w_arr[mask] = w_grid[lat_idx[mask], lon_idx[mask]]
         s_arr[mask] = s_grid[lat_idx[mask], lon_idx[mask]]
@@ -59,6 +66,7 @@ def map_thermal(df, years):
     df["log_effort"] = np.log1p(df["effort_araneae"].values.astype(np.float32))
     return df
 
+
 def main():
     t0 = time.time()
     print("▶ Cargando partición de calibración 2014-2019...")
@@ -66,8 +74,14 @@ def main():
     df_cal = map_thermal(df_cal, range(2014, 2020))
 
     features = [
-        "w_tmin", "s_tmean", "z_imp", "z_borde", "z_dosel",
-        "pop_density_h", "road_density_r", "log_effort"
+        "w_tmin",
+        "s_tmean",
+        "z_imp",
+        "z_borde",
+        "z_dosel",
+        "pop_density_h",
+        "road_density_r",
+        "log_effort",
     ]
     X_train = df_cal[features].values
     y_train = df_cal["y_joro_detected"].values
@@ -83,16 +97,22 @@ def main():
         print(f"  {f:15s}: {c:+.4f}")
 
     with open(OUT_COEF_JSON, "w") as fh:
-        json.dump({
-            "features": features,
-            "intercept": float(clf.intercept_[0]),
-            "coefficients": {f: float(c) for f, c in zip(features, clf.coef_[0])},
-            "n_train_rows": int(len(X_train)),
-            "n_train_presences": int(y_train.sum()),
-        }, fh, indent=2)
+        json.dump(
+            {
+                "features": features,
+                "intercept": float(clf.intercept_[0]),
+                "coefficients": {f: float(c) for f, c in zip(features, clf.coef_[0])},
+                "n_train_rows": int(len(X_train)),
+                "n_train_presences": int(y_train.sum()),
+            },
+            fh,
+            indent=2,
+        )
 
     train_probs = clf.predict_proba(X_train)[:, 1]
-    print(f"  Media predicha entrenamiento: {train_probs.mean():.6f} (Obs: {y_train.mean():.6f})")
+    print(
+        f"  Media predicha entrenamiento: {train_probs.mean():.6f} (Obs: {y_train.mean():.6f})"
+    )
 
     print("\n▶ Proyectando a ciegas sobre 2020-2024...")
     df_eval = pd.read_csv(EVAL_CSV)
@@ -101,12 +121,23 @@ def main():
     X_eval = df_eval[features].values
     eval_probs = clf.predict_proba(X_eval)[:, 1]
 
-    df_eval_out = df_eval[["cell_id", "year", "centroid_lat", "centroid_lon", "y_joro_detected", "effort_araneae", "ecoregion_block"]].copy()
+    df_eval_out = df_eval[
+        [
+            "cell_id",
+            "year",
+            "centroid_lat",
+            "centroid_lon",
+            "y_joro_detected",
+            "effort_araneae",
+            "ecoregion_block",
+        ]
+    ].copy()
     df_eval_out["p_sdm"] = eval_probs.astype(np.float32)
 
     df_eval_out.to_csv(OUT_CSV, index=False)
     print(f"✔ Predicciones SDM guardadas en: {OUT_CSV}")
     print(f"  Tiempo de ejecución: {time.time() - t0:.2f} s")
+
 
 if __name__ == "__main__":
     main()
