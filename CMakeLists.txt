@@ -43,15 +43,15 @@ else()
     set(JORO_SYCL_FLAGS   "")
     set(JORO_OPENMP_FLAGS "-fopenmp")
     if(JORO_ENABLE_AVX512)
-        set(JORO_ARCH_FLAGS   "-mavx512f -mavx512bw")
+        set(JORO_ARCH_FLAGS -mavx512f -mavx512bw)
     elseif(JORO_ENABLE_NATIVE)
-        set(JORO_ARCH_FLAGS   "-march=native")
+        set(JORO_ARCH_FLAGS -march=native)
     else()
-        set(JORO_ARCH_FLAGS   "-march=x86-64-v3") # Portabilidad segura para CI sin SIGILL
+        set(JORO_ARCH_FLAGS -march=x86-64-v3) # Portabilidad segura para CI sin SIGILL
     endif()
 endif()
 
-set(CMAKE_CXX_FLAGS_RELEASE "-O3 ${JORO_ARCH_FLAGS}")
+set(CMAKE_CXX_FLAGS_RELEASE "-O3")
 set(CMAKE_CXX_FLAGS_DEBUG   "-O0 -g -fsanitize=address")
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -61,9 +61,31 @@ find_package(OpenMP)
 if(NOT OpenMP_FOUND)
     if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
         message(STATUS "[OpenMP] Configurando OpenMP para Clang...")
-        set(OpenMP_CXX_FLAGS "-fopenmp=libomp")
-        set(OpenMP_CXX_LIB_NAMES "omp")
-        set(OpenMP_omp_LIBRARY "omp")
+        execute_process(
+            COMMAND ${CMAKE_CXX_COMPILER} -print-file-name=libomp.so
+            OUTPUT_VARIABLE CLANG_OMP_PATH
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+        )
+        execute_process(
+            COMMAND ${CMAKE_CXX_COMPILER} -print-file-name=libgomp.so
+            OUTPUT_VARIABLE CLANG_GOMP_PATH
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+        )
+        if(CLANG_OMP_PATH AND NOT CLANG_OMP_PATH STREQUAL "libomp.so")
+            set(OpenMP_CXX_FLAGS "-fopenmp=libomp")
+            set(JORO_OPENMP_FLAGS "-fopenmp=libomp")
+            set(OpenMP_CXX_LIB_NAMES "omp")
+            set(OpenMP_omp_LIBRARY "${CLANG_OMP_PATH}")
+        elseif(CLANG_GOMP_PATH AND NOT CLANG_GOMP_PATH STREQUAL "libgomp.so")
+            set(OpenMP_CXX_FLAGS "-fopenmp=libgomp")
+            set(JORO_OPENMP_FLAGS "-fopenmp=libgomp")
+            set(OpenMP_CXX_LIB_NAMES "gomp")
+            set(OpenMP_gomp_LIBRARY "${CLANG_GOMP_PATH}")
+        else()
+            set(OpenMP_CXX_FLAGS "-fopenmp=libomp")
+            set(OpenMP_CXX_LIB_NAMES "omp")
+            set(OpenMP_omp_LIBRARY "omp")
+        endif()
         find_package(OpenMP REQUIRED)
     else()
         find_package(OpenMP REQUIRED)

@@ -232,8 +232,6 @@ public:
                     int32_t dest_cell_id = spatial_lookup_.find_cell(p.x, p.y);
                     if (dest_cell_id != -1) {
                         local_arrivals[dest_cell_id] += w;
-                    } else {
-                        loc_esc += w;
                     }
                 } else {
                     loc_esc += w;

@@ -294,6 +294,9 @@ public:
                 const auto k_start = Clock::now();
                 q.submit([&](sycl::handler& cgh) {
                     sycl::local_accessor<uint32_t, 1> lhist(sycl::range<1>(kDistHistBins), cgh);
+                    sycl::local_accessor<uint32_t, 1> l_land(sycl::range<1>(kWgSize), cgh);
+                    sycl::local_accessor<uint32_t, 1> l_esc(sycl::range<1>(kWgSize), cgh);
+                    sycl::local_accessor<float, 1> l_swd(sycl::range<1>(kWgSize), cgh);
                     cgh.parallel_for(
                         sycl::nd_range<1>(n_wg * kWgSize, kWgSize),
                         [=](sycl::nd_item<1> item) {
@@ -329,13 +332,14 @@ public:
                                                          sycl::access::address_space::global_space>(
                                             d_arrivals[r.dest_cell])
                                             .fetch_add(r.weight);
-                                    } else {
-                                        w_esc = r.weight;
                                     }
                                 } else {
                                     w_esc = r.weight; // sigue en suspensión al terminar la ventana
                                 }
                             }
+                            l_land[lid] = w_land;
+                            l_esc[lid] = w_esc;
+                            l_swd[lid] = swd;
                             sycl::group_barrier(item.get_group());
 
                             for (size_t b = lid; b < static_cast<size_t>(kDistHistBins); b += kWgSize) {
@@ -347,11 +351,14 @@ public:
                                         .fetch_add(v);
                                 }
                             }
-                            const auto grp = item.get_group();
-                            const uint32_t s_land = sycl::reduce_over_group(grp, w_land, sycl::plus<uint32_t>());
-                            const uint32_t s_esc = sycl::reduce_over_group(grp, w_esc, sycl::plus<uint32_t>());
-                            const float s_swd = sycl::reduce_over_group(grp, swd, sycl::plus<float>());
                             if (lid == 0) {
+                                uint32_t s_land = 0, s_esc = 0;
+                                float s_swd = 0.0f;
+                                for (size_t i = 0; i < kWgSize; ++i) {
+                                    s_land += l_land[i];
+                                    s_esc += l_esc[i];
+                                    s_swd += l_swd[i];
+                                }
                                 const size_t g = item.get_group_linear_id();
                                 wg_land[g] = s_land;
                                 wg_esc[g] = s_esc;
@@ -422,8 +429,6 @@ public:
                     if (r.dest_cell >= 0) {
                         #pragma omp atomic
                         h_arrivals_[static_cast<size_t>(r.dest_cell)] += r.weight;
-                    } else {
-                        esc_acc += r.weight;
                     }
                 } else {
                     esc_acc += r.weight;

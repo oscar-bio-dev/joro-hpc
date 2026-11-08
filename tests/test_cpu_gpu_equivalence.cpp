@@ -48,13 +48,13 @@ int main() {
     gpu_engine->initialize_particles(cells, release);
     auto gpu_res = gpu_engine->run_dispersion(mock_atmo, 10.0f, 60);
 
-    JORO_TEST_ASSERT(gpu_res.total_released == n_particles, "Motor GPU no inicializó todas las partículas");
-    JORO_TEST_ASSERT(gpu_res.total_landed + gpu_res.total_escaped == n_particles,
-                     "Violación de conservación de partículas en GPU");
-
     std::cout << "  GPU: Liberadas = " << gpu_res.total_released 
               << " | Aterrizadas = " << gpu_res.total_landed
               << " | Escapadas = " << gpu_res.total_escaped << "\n";
+
+    JORO_TEST_ASSERT(gpu_res.total_released == n_particles, "Motor GPU no inicializó todas las partículas");
+    JORO_TEST_ASSERT(gpu_res.total_landed + gpu_res.total_escaped == n_particles,
+                     "Violación de conservación de partículas en GPU");
 
     // Tolerancia estocástica entre implementaciones (fracción de aterrizaje relativa)
     double cpu_land_ratio = static_cast<double>(cpu_res.total_landed) / n_particles;
