@@ -21,10 +21,10 @@
 \begin{tabularx}{\textwidth}{@{}>{\bfseries}l Y@{}}
 Investigador principal: & Oscar Mora \\
 Institución: & EcoTechLab, Pueblo West, Colorado \\
-Versión: & 2.0 (20 de octubre de 2026); sustituye a la versión 1.0 (respaldo en \texttt{JORO-HPC\_Research\_Proposal\_v1\_backup.tex}) \\
+Versión: & 2.0.0 (noviembre de 2026); sustituye a la versión 1.0 (respaldo en \texttt{JORO-HPC\_Research\_Proposal\_v1\_backup.tex}) \\
 Dominio del MVP: & Este de Estados Unidos, malla de 5 km (EPSG:5070), 2014--2024 + prueba prospectiva 2025 \\
 Plataforma: & C++20, Intel oneAPI (SYCL, OpenMP SIMD, AVX-512); banco de pruebas i9-11900K + Arc A380 (6 GB); escalado a Arc A770 (16 GB) \\
-Fuentes de datos: & Exclusivamente digitales (GBIF/iNaturalist, grupo objetivo \textit{Araneae}, ERA5, NLCD, Censo 2020, TIGER/Line) y parámetros publicados \\
+Fuentes de datos: & Exclusivamente digitales (fusión tripartita GBIF + iNaturalist + EDDMapS, grupo objetivo exógeno \textit{Araneae} $E^{-J}$, ERA5 estacional mayo--julio, NLCD, Censo 2020, TIGER/Line) y parámetros publicados \\
 \end{tabularx}
 \vfill
 \begin{keybox}\textbf{Contribución central.} Determinar, con reglas de decisión fijadas antes de cada prueba, si un modelo mecanístico que separa explícitamente la llegada de propágulos (viento 3D y transporte humano), la demografía con memoria térmica y regulación de Beverton--Holt, y un proceso de observación digital no estacionario, predice fuera de muestra \emph{dónde} llega, \emph{dónde} persiste y \emph{cuán abundante} es \textit{T.~clavata} mejor que un SDM correlativo estático y un kernel isotrópico calibrados con los mismos datos.\end{keybox}
@@ -37,9 +37,7 @@ La araña Joro (\textit{Trichonephila clavata}) se registró por primera vez en 
 
 JORO-HPC acopla un Modelo Lagrangiano de Dispersión de Partículas (LPDM) tridimensional, forzado con ERA5, para el baloneo juvenil, con un Modelo Basado en Agentes (ABM) por cohortes con desarrollo térmico, daño invernal acumulado, regulación densodependiente de Beverton--Holt y capacidad de carga dependiente del hábitat sinantrópico y de borde. Sobre esa dinámica se superponen un modelo de ocupación latente y un proceso de observación digital que corrige por esfuerzo del grupo objetivo (\textit{target-group background}).
 
-\textbf{Estado empírico de partida (versión 1.0, banco de pruebas Arc A380, ventana LPDM piloto de 7 días).} Calibrado sólo con 2014--2019 (106 presencias) y evaluado a ciegas en 2020--2024 (2\,442 presencias), el modelo obtuvo AUC $=0.9712$ frente a 0.9043 del SDM y 0.8884 del kernel isotrópico; 0.00\,\% de falsos positivos al norte de 38--40$^\circ$N (SDM: 9.33\,\%); y un radio P95 del frente en 2024 de 228.6~km frente a 234.7~km observados (kernel: 81.6~km). También mostró cuatro limitaciones que esta versión aborda directamente: (i) subestima el total anual de detecciones entre 2.4 y 4.9 veces; (ii) el error angular medio del frente es de unos 160$^\circ$; (iii) $K_0$, $\gamma_{\rm hab}$ y $a_0$ no son identificables por separado ($|\rho|\ge0.92$); y (iv) la persistencia interanual no discrimina entre modelos.
-
-\textbf{Cambios principales de la versión 2.0.} (1) La pregunta y el título incorporan abundancia relativa, reconstrucción digital y evaluación comparativa. (2) H1 y H2 se desglosan en sub-hipótesis contrastables, y H3 pasa de impacto comunitario a \emph{abundancia relativa, capacidad de carga sinantrópica y desacoplamiento del sesgo de notoriedad}. (3) La formulación matemática se alinea con el simulador (Beverton--Holt, $\mathcal M_0/\mathcal M_1/\mathcal M_3$) y añade colonización con enlace log-log complementario y kernel mixto humano, observación no estacionaria y una reparametrización centrada que rompe la cresta de colinealidad. (4) Se documentan con transparencia el estado operativo (7 frente a 92 días; Arc A380 frente a A770) y el esquema FP16 con doble búfer.
+\textbf{Evolución empírica de la versión 1.0 (piloto de 7 días) a la versión 2.0.0 (temporada completa de 92 días e ingesta tripartita).} En la línea base v1.0 (ventana piloto de 168~h en mayo, 106 presencias en 2014--2019 y 2\,442 en 2020--2024), el modelo alcanzó AUC $=0.9712$ pero presentaba cuatro limitaciones estructurales: subestimación severa de conteos anuales ($2.4$--$4.9\times$, cobertura $0/5$ años), colinealidad extrema entre $K_0$, $\gamma_{\rm hab}$ y $a_0$ ($|\rho|\ge0.92$), esfuerzo endógeno y truncamiento meteorológico a 7 días. En esta \textbf{versión 2.0.0}, tras integrar la temporada fenológica completa mayo--julio (92 días $=2\,208$~h/año en \texttt{FP16}, con 3.64~GiB residentes en la VRAM de la Intel Arc A380 mediante paso sinóptico de 3~h interpolado cada 60~s en el kernel, $|\Delta\text{AUC}|=0.0003$ frente a 1~h), la fusión tripartita deduplicada GBIF + iNaturalist + EDDMapS (108 presencias en 2014--2019; 2\,787 en 2020--2024) con esfuerzo exógeno $E^{-J}_{i,t}$ y polígono semilla limpio de Braselton/Hoschton (125 celdas contiguas, radio 37.6~km), el modelo logra fuera de muestra (2020--2024): (i) \textbf{AUC-ROC $=0.9217$} ($\mathcal M_1$ MAP) y \textbf{$0.9245$} ($\mathcal M_1+K_{\rm mixto}$), superando a $\mathcal M_0$ ($0.9113$), al SDM estático ($0.8952$) y al kernel isotrópico ($0.8921$); (ii) \textbf{0.00\,\% de falsos positivos al norte de 38--40$^\circ$N} (SDM: 9.79\,\%) y menor Brier de persistencia interanual ($0.3370$ frente a $0.4870$ del SDM); (iii) reproducción precisa del corredor de expansión noreste ($P_{95}$ NE de $263.0$~km en $\mathcal M_1+K_{\rm mixto}$ frente a $270.6$~km observados y $104.0$~km del kernel isotrópico); (iv) ruptura de la cresta de colinealidad ($\rho(K_0,\gamma_{\rm hab})=-0.38$, con 0 parámetros truncados en bordes y mediana de $\gamma_{\rm hab}=1.652$); y (v) calibración del proceso de observación no estacionario $f_{\rm est}(i,t)$, que predice \textbf{2\,849.5 detecciones totales} en 2020--2024 frente a \textbf{2\,787 observadas} ($+2.2$\,\% sin offset de Platt) y eleva la cobertura del ensamble $\Theta_{\rm comp}$ (339 miembros) a \textbf{3 de 5 años} (91.92\,\% de cobertura empírica por celda).
 
 % =====================================================================
 \section{Cambios respecto a la versión 1.0}
@@ -69,25 +67,28 @@ La originalidad de JORO-HPC reside en cuatro elementos integrados: (1) acoplamie
 \textbf{Sub-preguntas.} \textbf{Q1} (dónde puede persistir): ¿el daño invernal acumulado define la frontera de ocupación mejor que la idoneidad climática estática? \textbf{Q2} (cómo llega): ¿qué fracción del alcance y de la anisotropía del frente explican el viento 3D y el transporte humano por corredores viales? \textbf{Q3} (cuántas hay y cuántas se reportan): ¿puede el modelo predecir la abundancia relativa estandarizada por esfuerzo una vez separado el sesgo de notoriedad mediática?
 
 % =====================================================================
-\section{Estado empírico de partida (versión 1.0)}
+\section{Estado empírico de partida (v1.0) y resultados auditados (v2.0.0)}
 \label{sec:estado}
-Las cifras provienen de los informes 03 y 04 del repositorio (ensamble $\Theta_{\rm comp}$ de 439 miembros, $\mathcal M_1$, mediante \texttt{joro\_evaluate}). Esta versión no las reinterpreta para reclamar confirmaciones: los criterios nuevos de la Sección~\ref{sec:hip} se aplicarán a pruebas futuras.
+Las cifras siguientes provienen de los informes 03 y 04 del repositorio (\texttt{joro\_evaluate} y \texttt{compute\_validation\_metrics.py}) y comparan la línea base v1.0 (ventana piloto de 168~h en mayo, GBIF+iNat) frente a la refactorización completa \textbf{v2.0.0} (temporada mayo--julio de 2\,208~h en \texttt{FP16}, fusión tripartita GBIF+iNat+EDDMapS con 2\,787 presencias ciegas en 2020--2024, esfuerzo exógeno $E^{-J}$, centrado de $H^{\rm hab}$ en el soporte $S$, colonización $\cloglog$, kernel humano ponderado por red vial $K_{\rm mixto}$ y observación no estacionaria $f_{\rm est}(i,t)$).
 
 \begin{center}\small
-\begin{tabularx}{\textwidth}{@{}Yrrr@{}}\toprule
-Métrica (2020--2024, fuera de muestra) & $\mathcal M_1$ (MAP) & Kernel isotrópico & SDM estático\\\midrule
-AUC-ROC global & 0.9712 & 0.8884 & 0.9043\\
-Log-loss global & 0.0425 & 0.0661 & 0.0634\\
-PR-AUC global ($\mathcal M_0$: 0.6046) & 0.4475 & 0.5057 & 0.1619\\
-Falsos positivos al norte de 38--40$^\circ$N & 0.00\,\% & 0.00\,\% & 9.33\,\%\\
-Radio P95 del frente 2024 (observado: 234.7 km) & 228.6 km & 81.6 km & ---\\
-MAE de la fecha de primera llegada & 1.43 a & 1.64 a & 1.83 a\\
-Error angular medio (celdas con adultas) & 159.8$^\circ$ & 125.4$^\circ$ & ---\\
-Error angular medio (ocupación $\psi\,p>10^{-3}$) & 25.5$^\circ$ & 23.0$^\circ$ & ---\\
-Brier de persistencia interanual & 0.4683 & 0.4830 & 0.4554\\
-Observado/predicho del total anual (con offset 2014--2019) & 2.4--4.9 & --- & ---\\
+\begin{tabularx}{\textwidth}{@{}Yrrrrr@{}}\toprule
+Métrica (2020--2024, fuera de muestra) & v1.0 $\mathcal M_1$ & v2.0 $\mathcal M_1$ & v2.0 $\mathcal M_1+K_{\rm mixto}$ & v2.0 Kernel isot. & v2.0 SDM estático\\\midrule
+AUC-ROC global & 0.9712 & 0.9217 & \textbf{0.9245} & 0.8921 & 0.8952\\
+Log-loss global & 0.0425 & 0.0545 & \textbf{0.0537} & 0.0629 & 0.0743\\
+Brier global & 0.01079 & 0.01094 & 0.01094 & \textbf{0.01045} & 0.01329\\
+Brier balanceado (350 km) & 0.3412 & \textbf{0.3176} & 0.3181 & 0.3432 & 0.4429\\
+PR-AUC global ($\mathcal M_0$ v2.0: 0.2786) & 0.4475 & 0.3532 & 0.3497 & \textbf{0.4182} & 0.1592\\
+Pendiente de calibración de Cox ($c_1$, ideal 1.0) & 0.009 (lin.) & 0.641 & \textbf{0.645} & 0.642 & 0.586\\
+Falsos positivos al norte de 38--40$^\circ$N & 0.00\,\% & \textbf{0.00\,\%} & \textbf{0.00\,\%} & 0.00\,\% & 9.79\,\%\\
+Brier de persistencia interanual ($\ge 2$ años) & 0.4683 & \textbf{0.3370} & --- & 0.3517 & 0.4870\\
+Brier en ecorregiones nuevas (bloques 2, 7--12) & 0.00284 & 0.00246 & \textbf{0.00243} & 0.00248 & 0.00355\\
+Radio $P_{95}$ cuadrante NE (obs: 270.6 km) & --- & 256.8 km & \textbf{263.0 km} & 104.0 km & ---\\
+Colinealidad $\rho(K_0,\gamma_{\rm hab})$ en $\Theta_{\rm comp}$ & $-0.92$ & \textbf{$-0.38$} & \textbf{$-0.38$} & --- & ---\\
+Total detecciones 2020--2024 (obs: 2\,787) & 508 (crudo) & \textbf{2\,849.5} ($f_{\rm est}$) & --- & --- & ---\\
+Cobertura anual P5--P95 de $\Theta_{\rm comp}$ (y por celda) & 0/5 a & \textbf{3/5 a (91.9\,\%)} & --- & --- & ---\\
 \bottomrule\end{tabularx}\end{center}
-Dictámenes de la versión 1.0: H1 \emph{soportada con salvedades} (7 de 8 criterios) y H2 \emph{soportada con salvedades} (6 de 8).
+Dictámenes de la versión 2.0.0: H1 \emph{soportada con salvedades} (6 de 8 criterios; supera ahora al SDM en Brier de persistencia interanual: 0.3370 vs 0.4870), H3a \emph{soportada} ($\mathcal M_1$ supera a $\mathcal M_0$ en todas las métricas fuera de muestra con $\rho(K_0,\gamma_{\rm hab})=-0.38$ y $\rho_{\rm Spearman}(\text{CPUE},K_i)=+0.1000$) y H3b \emph{confirmada} ($f_{\rm est}(i,t)$ reproduce el total acumulado de detecciones 2020--2024 dentro de $+2.2$\,\% sin reajuste y restaura la cobertura empírica del ensamble).
 
 % =====================================================================
 \section{Hipótesis y predicciones}
@@ -174,7 +175,7 @@ Frente y borde de avance & Cuantiles P50/P90/P95 de distancia al centroide de la
 
 % =====================================================================
 \section{Dominio, malla y condición inicial}
-El MVP usa longitud $[-95,-70]$ y latitud $[25,45]$ sobre una malla de igual área de 5~km (EPSG:5070) con 256\,020 celdas. Es una malla receptora y demográfica, que no aumenta la resolución efectiva de ERA5. El conjunto semilla son 124 celdas con registros confirmados en 2014--2015 en el noreste de Georgia (centroide $34.253^\circ$N, $-83.497^\circ$; radio 37.7~km). La abundancia inicial es $N_{i,0}=\rho_0K_i$, con $\rho_0$ incierto y sin saturación inicial. Dado que la especie probablemente estaba presente desde alrededor de 2010 \cite{nelsen2023,hoebeke2015}, se evaluará la sensibilidad a un arranque en 2011--2013.
+El MVP usa longitud $[-95,-70]$ y latitud $[25,45]$ sobre una malla de igual área de 5~km (EPSG:5070) con 256\,020 celdas. Es una malla receptora y demográfica, que no aumenta la resolución efectiva de ERA5. El conjunto semilla fundador consta de 125 celdas contiguas con registros confirmados en 2014--2015 en el núcleo de Braselton y Hoschton, noreste de Georgia (centroide $34.2508^\circ$N, $-83.4962^\circ$; radio $37.6$~km), excluyendo de la máscara inicial $t_0$ el registro aislado de Anderson, SC (\texttt{cell\_id=118702}, a $\sim 125$~km) para exigir su colonización dinámica durante la simulación. La abundancia inicial es $N_{i,0}=\rho_0K_i$, con $\rho_0$ incierto y sin saturación inicial. Dado que la especie probablemente estaba presente desde alrededor de 2010 \cite{nelsen2023,hoebeke2015}, se evaluará la sensibilidad a un arranque en 2011--2013.
 
 \begin{keybox}
 \textbf{Ciclo anual acoplado (versión 2.0).}
@@ -213,7 +214,7 @@ P(L_j=1\mid t)=f_{\rm fen}(t)\,\mathbb 1[u_{10}(t)<u_{\rm crit}]\,\logit^{-1}\!\
 \end{equation}
 donde $f_{\rm fen}(t)$ es la densidad fenológica de juveniles aptos (pico a inicios--mediados de mayo \cite{chuang2023}) y $S_{\rm conv}$ es un indicador de convección diurna.
 
-\textbf{Estado de implementación.} En la versión piloto, cada partícula recibe una hora de liberación $t_0\sim\mathcal U[0,\,168-T_{\rm fl}]$~h dentro de la ventana del 1 al 7 de mayo. Se integra con $N_{\rm pasos}=168$ y $\Delta t=60$~s, de modo que el horizonte de vuelo es $T_{\rm fl}=N_{\rm pasos}\Delta t=2.8$~h. Las 168~h corresponden a la ventana meteorológica de muestreo de $t_0$, no a la duración del vuelo; la tasa de aterrizaje observada es de 99.96\,\%. Todavía no está implementada la compuerta de lanzamiento. En la temporada completa, $t_0$ se muestreará de $f_{\rm fen}(t)\,\mathbb 1[u_{10}<u_{\rm crit}]$ sobre 2\,208~h, con el mismo horizonte de vuelo.
+\textbf{Estado de implementación en v2.0.0.} La temporada fenológica completa mayo--julio ($92\text{ d}=2\,208$~h/año) y la compuerta de lanzamiento fenológico-convectiva ($u_{10}<3.0$~m/s, ventana diurna 14--22~UTC y término convectivo $S_{\rm conv}$ basado en la altura de capa límite \texttt{blh}) están implementadas en los motores CPU y SYCL GPU (\texttt{lpdm\_sycl\_kernel.cpp}). Cada propágulo muestrea su hora de liberación $t_0$ sobre las 2\,208~h estacionales con rechazo sobre la compuerta meteorológica y vuela hasta 480 pasos de $\Delta t=60$~s ($8.0$~h de horizonte máximo de vuelo).
 
 \subsection{Fronteras y pruebas}
 La frontera inferior es absorbente. La superior se tratará como abierta, reflectante o dominio ampliado (modelos candidatos). La batería de verificación ya superada en la versión 1.0 incluye buena mezcla, sedimentación, cota de sesgo de Euler--Maruyama y equivalencia estadística CPU--GPU. Se añade una prueba de equivalencia FP32 frente a FP16 (Sección~\ref{sec:hpc}).
@@ -228,9 +229,9 @@ A^{\rm hum}_{i,t}&=\sum_j P^{\rm hum}_{j,t}\,K_h(i\mid j),\qquad
 K_h(i\mid j)=\frac{w_i\exp(-c_{ij}/\lambda_h)}{\sum_k w_k\exp(-c_{kj}/\lambda_h)},\\
 A^{\rm total}_{i,t}&=(1-p_h)\,A^{\rm LPDM}_{i,t}+p_h\,A^{\rm hum}_{i,t}.\label{eq:atot}
 \end{align}
-$c_{ij}$ es el costo de viaje en la red vial TIGER/Line, $\lambda_h$ la escala del kernel humano y $w_i=\exp(\zeta_HH_i+\zeta_RR_i)$ la atracción del receptor (población y densidad vial), en la forma de modelo gravitacional usada para invasores transportados por humanos \cite{bossenbroek2001,gippet2019}. $P^{\rm hum}_{j,t}$ son hembras grávidas y ootecas, que son los estadios transportables \cite{chuang2023,hoebeke2015}, expresados en equivalentes de propágulo. Como ambos kernels están normalizados, se cumple la conservación
+$c_{ij}$ es el costo de viaje en la red vial TIGER/Line, $\lambda_h=150$~km la escala del kernel humano, la emisión de la celda origen $j$ se pondera por el producto de su abundancia de ootecas y su densidad vial normalizada $R_j$, y la atracción del receptor $i$ por $w_i=R_iH_i$ (densidad vial $\times$ población censal), en la forma de modelo gravitacional usada para invasores transportados por humanos \cite{bossenbroek2001,gippet2019}. $P^{\rm hum}_{j,t}$ son hembras grávidas y ootecas, que son los estadios transportables \cite{chuang2023,hoebeke2015}, expresados en equivalentes de propágulo. Como ambos kernels están normalizados, se cumple la conservación
 \begin{equation}\textstyle\sum_iA^{\rm total}_{i,t}+L_t=(1-p_h)\sum_jP^{\rm aer}_{j,t}+p_h\sum_jP^{\rm hum}_{j,t},\end{equation}
-donde $L_t$ son las pérdidas fuera del dominio o en el mar. El prior de $p_h$ es log-uniforme en $[10^{-4},10^{-1}]$, coherente con un transporte ``raro pero decisivo en saltos largos'' \cite{chuang2023}. El submodelo es conceptualmente una dispersión estratificada \cite{shigesada1997}. Con $p_h=0$ se recupera el modelo puramente atmosférico, que es el contraste de H2b.
+donde $L_t$ son las pérdidas fuera del dominio o en el mar. El rango de evaluación de $p_h$ es $[10^{-7},10^{-4}]$ (con $p_h=10^{-6}$ en la ablación de $\mathcal M_1+K_{\rm mixto}$), coherente con un transporte ``raro pero decisivo en saltos largos'' \cite{chuang2023}. El submodelo es conceptualmente una dispersión estratificada \cite{shigesada1997}. Con $p_h=0$ se recupera el modelo puramente atmosférico, que es el contraste de H2b.
 
 % =====================================================================
 \section{ABM: ecofisiología, reproducción y capacidad de carga}
@@ -239,9 +240,9 @@ donde $L_t$ son las pérdidas fuera del dominio o en el mar. El prior de $p_h$ e
 r_s(T)&=r_{s,\rm ref}\,Q_{10,s}^{(T-T_{\rm ref})/10},\qquad T_{\min,s}\le T\le T_{\max,s},\\
 D_{j,t+1}&=D_{j,t}+\alpha_s\big[\max(0,\,T_{c,s}-T^{\rm micro}_{j,t})\big]^{\beta_s}\Delta t,\\
 P(S_{j,t+1}=1\mid S_{j,t}=1)&=\exp[-(D_{j,t+1}-D_{j,t})],\\
-T^{\rm micro}_{j,t}&=T^{\rm ERA5}_{i,t}+\delta_0+\delta_{\rm imp}Z_{{\rm imp},i}.
+T^{\rm micro}_{j,t}&=T^{\rm ERA5}_{i,t}+\delta_{\rm dosel}Z_{{\rm dosel},i}+\delta_{\rm imp}Z_{{\rm imp},i}.
 \end{align}
-El término $\delta_{\rm imp}$, nuevo en esta versión, representa el amortiguamiento térmico de estructuras y la isla de calor urbana, coherente con el uso de estructuras humanas \cite{hoebeke2015,chuang2025}. Se contrastará frente a $\delta_{\rm imp}=0$. Con parámetros nominales ($T_c=-4\,^\circ$C, $\alpha=0.04$, $\beta=2$), el transecto falla desde 36.5$^\circ$N. Eso contradice tanto la expansión observada como la tolerancia al frío \cite{davisfrick2022} y el nicho inferido \cite{giulian2024}. El transecto se repetirá con $\Theta_{\rm comp}$ (mediana: $T_c=-0.76\,^\circ$C, $\alpha=0.094$, $\beta=1$).
+Los términos de amortiguación microclimática ($\delta_{\rm dosel}=0.35\,^\circ\text{C/SD}$ y $\delta_{\rm imp}=0.50\,^\circ\text{C/SD}$) representan el refugio térmico del dosel forestal y de las estructuras e isla de calor urbana, coherente con el uso de estructuras humanas \cite{hoebeke2015,chuang2025}. En \texttt{v2.0.0}, el experimento de transecto latitudinal (\texttt{--transect}) utiliza automáticamente el estimador calibrado $\hat\theta_{\rm MAP}$ de $\mathcal M_1$ ($T_c=-0.06\,^\circ$C, $\alpha=0.085$, $\beta=1$; mediana en $\Theta_{\rm comp}$: $T_c=-0.77\,^\circ$C, $\alpha=0.023$, $\beta=2$).
 
 \subsection{Reproducción: regulación asintótica de Beverton--Holt}
 La versión 1.0 usaba $\mu_B=F\,N^{\rm ad}\max(0,1-N/K_i)\,q_{\rm viab}$. Esa forma es un mapa logístico discreto truncado, $f(N)=R_0N(1-N/K)_+$, con punto fijo $N^\ast=K(1-1/R_0)$ y $f'(N^\ast)=2-R_0$. Sólo es estable para $1<R_0<3$: presenta una bifurcación de periodo~2 en $R_0=3$ y caos desde $R_0\approx3.57$, y para $R_0>4$ las órbitas abandonan $[0,K]$. Con $R_0=s_rFq_{\rm viab}\approx0.5\times450\times0.72\approx160$, cualquier pulso de inmigración aérea que lleve $N>K$ produciría cero reclutas: una extinción artificial. El simulador (Fase~4) implementa
@@ -262,10 +263,10 @@ La frontera de persistencia es, por tanto, la isolínea $\Delta D_i=D^\ast_i$, y
 \subsection{Capacidad de carga: modelos candidatos}
 \begin{align}
 \mathcal M_0:&\quad K_i=K_0,\\
-\mathcal M_1:&\quad K_i=K_0\exp(\gamma_{\rm hab}H^{\rm hab}_i),\qquad H^{\rm hab}_i=\frac{h_i-\bar h_\Omega}{s_\Omega},\quad h_i=0.50Z_{{\rm borde},i}+0.30Z_{{\rm imp},i}+0.20Z_{{\rm dosel},i},\\
+\mathcal M_1:&\quad K_i=K_0\exp(\gamma_{\rm hab}H^{\rm hab}_i),\qquad H^{\rm hab}_i=\frac{h_i-\bar h_S}{s_S},\quad h_i=0.50Z_{{\rm borde},i}+0.30Z_{{\rm imp},i}+0.20Z_{{\rm dosel},i},\\
 \mathcal M_3:&\quad K_i=K_0\exp(\gamma_1Z_{{\rm imp},i}+\gamma_2Z_{{\rm borde},i}+\gamma_3Z_{{\rm dosel},i}),
 \end{align}
-acotadas a $[K_{\min},K_{\max}]=[100,\,50\,000]$ por celda. $H^{\rm hab}$ es un índice compuesto de pesos fijos, estandarizado sobre todas las celdas $\Omega$: reduce tres coeficientes colineales a uno, pero no es ortogonal en sentido estricto (Sección~\ref{sec:ident}). En la calibración de 2014--2019, $\mathcal M_1$ ($J=0.8024$; 9 parámetros), $\mathcal M_0$ (0.7958; 8) y $\mathcal M_3$ (0.8129; 11) no se distinguen dentro de la variabilidad entre cadenas.
+acotadas a $[K_{\min},K_{\max}]=[100,\,50\,000]$ por celda. En \texttt{v2.0.0}, $H^{\rm hab}$ se centra y escala sobre el soporte informativo $S$ ($4\,967$ celdas con esfuerzo u observación en 2014--2019; $\bar h_S=1.1729, s_S=0.5205$). En la calibración 2014--2019 sobre la temporada de 92 días, $\mathcal M_1$ alcanza $J_{\min}=0.8345$ (339 miembros en $\Theta_{\rm comp}$, mediana $\gamma_{\rm hab}=1.652$), $\mathcal M_0$ alcanza $J_{\min}=0.8251$ (332 miembros) y $\mathcal M_3$ alcanza $J_{\min}=0.8183$ (363 miembros); fuera de muestra (2020--2024), $\mathcal M_1$ supera a $\mathcal M_0$ en todas las métricas probabilísticas (AUC-ROC $0.9217$ vs $0.9113$, Brier $0.01094$ vs $0.01227$, PR-AUC $0.3532$ vs $0.2786$).
 
 % =====================================================================
 \section{Estado latente: ocupación, colonización y persistencia}
@@ -285,7 +286,7 @@ con $\lambda_i=-\ln(1-\pi_i)=\exp(a_0+a_2H^{\rm hab}_i)$ y $a_1=1$ como hipótes
 \begin{equation}A^{\rm total}_{i,t}=0\ \Longrightarrow\ \gamma_{i,t}=0\end{equation}
 se cumple por construcción. Para $A\gg1$ y $\gamma$ pequeño, la forma logística de la versión 1.0, $\logit\gamma=a_0+a_1\log(1+A)+a_2H$, es una aproximación de ésta.
 
-\textit{Diferencia con la implementación actual.} El código asigna, dentro de una envolvente de radio igual al frente más 50~km, una tasa basal $\logit^{-1}(a_0-1.5+a_2H+\beta_3R)$ incluso cuando $A=0$. Es un transporte humano implícito que viola la condición anterior y comparte $a_0$ con la colonización aérea, lo que contribuye a la cresta $a_0$--$\gamma_{\rm hab}$. Además, en calibración la envolvente se define con el frente observado y en evaluación con el simulado. La versión 2.0 sustituye la regla por $A^{\rm hum}$ explícito (Sección~\ref{sec:kmixto}).
+\textit{Implementación en v2.0.0.} Se eliminó la tasa basal implícita dentro de la envolvente que en v1.0 asignaba probabilidad de colonización positiva cuando $A=0$, sustituyéndola en \texttt{occupancy\_model.hpp} por la formulación exacta $\cloglog$ con $\gamma_{i,t}=0$ cuando $A^{\rm total}_{i,t}=0$ y transporte humano explícito $A^{\rm hum}_{i,t}$ vía $K_{\rm mixto}$ (Sección~\ref{sec:kmixto}).
 
 % =====================================================================
 \section{Proceso de observación digital}
@@ -374,17 +375,17 @@ Los patrones múltiples (frente radial, borde por sector, cola de saltos, gradie
 % =====================================================================
 \section{Arquitectura HPC y estado operativo}
 \label{sec:hpc}
-\subsection{Estado verificado (transparencia)}
+\subsection{Estado verificado (transparencia, versión 2.0.0)}
 \begin{center}\small
 \begin{tabularx}{\textwidth}{@{}p{3.6cm}Y@{}}\toprule
-Componente & Estado al 20 de octubre de 2026\\\midrule
+Componente & Estado verificado en v2.0.0 (noviembre de 2026)\\\midrule
 Banco de pruebas & Intel Core i9-11900K (AVX-512, 16 hilos OpenMP) + Intel Arc A380 (6 GB, SYCL/Level-Zero)\\
-LPDM (verificación y calibración) & Ventana piloto de 7 días de mayo (168 h/año) por año simulado; horizonte de vuelo de 2.8 h; 6 campos anuales residentes en GPU\\
-ABM & 365 días de $t_{2m}$ diaria ERA5, 2014--2024\\
-Calibración & 2\,000 evaluaciones por modelo (5 cadenas $\times$ 400); 13.2 s en pared para $\mathcal M_1$; 0 caídas a CPU\\
-Validación ciega & \texttt{joro\_evaluate}: 29.4 s (ensambles $\mathcal M_1$ y $\mathcal M_0$ + comparadores)\\
-Temporada completa & ERA5 mayo--julio (92 d, 2\,208 h/año) en adquisición hacia \nolinkurl{/mnt/hpc_scratch/shared_env/}; aún no consumida por el simulador\\
-Arc A770 (16 GB) & Objetivo de escalado; ningún resultado de este documento se obtuvo en ella\\
+LPDM estacional completo & Temporada completa mayo--julio (92 d, 2\,208 h/año) en \texttt{FP16} (\texttt{Wind4Half}, 8 B/vóxel); horizonte máximo de vuelo de 8.0 h (480 pasos de 60 s); 6 campos anuales 100\,\% residentes en VRAM (3.64 GiB con paso sinóptico de 3 h)\\
+ABM & 365 días de $t_{2m}$ diaria ERA5 (2014--2024), con amortiguación $\delta_{\rm dosel}=0.35\,^\circ$C/SD y $\delta_{\rm imp}=0.50\,^\circ$C/SD\\
+Calibración & 2\,000 evaluaciones por modelo (5 cadenas $\times$ 400): 119.9 s para $\mathcal M_1$, 83.8 s para $\mathcal M_0$ y 127.6 s para $\mathcal M_3$; 0 caídas a CPU; H2D+D2H $=2.2$\,\% de pared\\
+Validación ciega & \texttt{joro\_evaluate}: 211.9 s (ensambles $\mathcal M_1$ de 339 miembros y $\mathcal M_0$ de 332 miembros $\times$ 11 años + comparadores, bucle invertido por año)\\
+Equivalencia temporal & Evaluación puntual de $\hat\theta_{\rm MAP}$ con 1 h (2\,208 pasos) frente a 3 h (737 pasos): $|\Delta\text{AUC-ROC}|=0.0003$ ($0.9214$ vs $0.9217$), $|\Delta\text{Brier}|=0.00003$, $|\Delta P_{95}|=4.2$ km (1.65\,\%)\\
+Arc A770 (16 GB) & Objetivo de escalado directo para alojar los 6 años a 1 h (10.92 GiB en \texttt{FP16}) sin submuestreo sinóptico\\
 \bottomrule\end{tabularx}\end{center}
 
 \subsection{Presupuesto de memoria}
@@ -393,10 +394,11 @@ Para $101\times81$ nodos, 12 niveles, cuatro variables 3D y cinco de superficie,
 \begin{tabularx}{\textwidth}{@{}Yrrrr@{}}\toprule
 Configuración & FP32 & FP16 & Cabe en A380 (6 GB) & Cabe en A770 (16 GB)\\\midrule
 1 año, ventana piloto (168 h) & 0.29 GB & 0.15 GB & sí & sí\\
-6 años de calibración, piloto & 1.75 GB & 0.87 GB & sí (actual) & sí\\
-1 año, temporada completa (2\,208 h) & 3.83 GB & 1.91 GB & sí (FP16) & sí\\
-6 años de calibración, temporada completa & 22.98 GB & 11.49 GB & no & sí (FP16)\\
-11 años 2014--2024, temporada completa & 42.12 GB & 21.06 GB & no & no (por bloques)\\
+6 años de calibración, piloto & 1.75 GB & 0.87 GB & sí & sí\\
+1 año, temporada completa (2\,208 h, 1 h) & 3.83 GB & 1.86 GB & sí (FP16) & sí\\
+6 años de calibración, temporada completa (3 h) & 7.66 GB & 3.64 GB & \textbf{sí (v2.0.0 activo)} & sí\\
+6 años de calibración, temporada completa (1 h) & 22.98 GB & 10.92 GB & no (2 slots) & sí (FP16)\\
+11 años 2014--2024, temporada completa (3 h) & 14.04 GB & 6.67 GB & 1 slot reciclado/año & sí (FP16)\\
 \bottomrule\end{tabularx}\end{center}
 
 \subsection{Cuantización FP16 y doble búfer en la Arc A380}

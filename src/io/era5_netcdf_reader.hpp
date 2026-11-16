@@ -23,8 +23,8 @@ struct AtmosphericField3D {
     // Buffers planos contiguos en memoria host o USM
     std::vector<float> u;       ///< Componente zonal [m/s]
     std::vector<float> v;       ///< Componente meridional [m/s]
-    std::vector<float> w;       ///< Velocidad vertical convertida [m/s]
-    std::vector<float> t;       ///< Temperatura del aire [K]
+    std::vector<float> w;       ///< Velocidad vertical geométrica convertida [m/s]
+    std::vector<float> t;       ///< Vacío tras conversión al vuelo omega -> w (no retiene 3D completo en RAM)
     
     // Variables superficiales 2D [tiempo][latitud][longitud]
     std::vector<float> sp;      ///< Presión superficial [Pa]
@@ -32,6 +32,23 @@ struct AtmosphericField3D {
     std::vector<float> u10;     ///< Viento a 10m zonal [m/s]
     std::vector<float> v10;     ///< Viento a 10m meridional [m/s]
     std::vector<float> blh;     ///< Altura de capa límite [m]
+
+    /// Libera inmediatamente todos los vectores dinámicos devolviendo la memoria al sistema
+    void clear_and_shrink() noexcept {
+        n_times = n_levels = n_lats = n_lons = 0;
+        pressure_levels_hpa.clear(); pressure_levels_hpa.shrink_to_fit();
+        lats.clear(); lats.shrink_to_fit();
+        lons.clear(); lons.shrink_to_fit();
+        u.clear(); u.shrink_to_fit();
+        v.clear(); v.shrink_to_fit();
+        w.clear(); w.shrink_to_fit();
+        t.clear(); t.shrink_to_fit();
+        sp.clear(); sp.shrink_to_fit();
+        t2m.clear(); t2m.shrink_to_fit();
+        u10.clear(); u10.shrink_to_fit();
+        v10.clear(); v10.shrink_to_fit();
+        blh.clear(); blh.shrink_to_fit();
+    }
 };
 
 /// Malla superficial diaria (365 días x 81 lats x 101 lons) para forzamiento estacional del ABM
@@ -109,6 +126,14 @@ public:
     /// Carga un mes de datos horarios en un tensor 3D continuo
     bool load_month(int year, int month, AtmosphericField3D& field);
 
+    /// Carga y concatena cronológicamente una temporada multi-mes (por defecto mayo-julio = {5, 6, 7}, hasta 2,208 h).
+    /// Resiliente ante descargas en curso: si _06.nc o _07.nc aún no están cerrados en disco, carga los meses disponibles
+    /// (mínimo el mes 5) e informa el total de horas cargadas.
+    bool load_season(int year, const std::vector<int>& months, AtmosphericField3D& out);
+    bool load_season(int year, AtmosphericField3D& out) {
+        return load_season(year, {5, 6, 7}, out);
+    }
+
     /// Carga la serie térmica diaria completa de 365 días para un año dado
     bool load_daily_thermal_year(int year, DailyThermalGrid& grid);
 
@@ -127,6 +152,11 @@ public:
 
 private:
     [[nodiscard]] bool year_allowed(int year);
+
+    /// Lee y concatena cronológicamente `months` en `field` por bloques temporales (omega -> w al vuelo, sin retener `t`).
+    /// `resilient`: los meses posteriores al primero que falten/estén incompletos se omiten (descarga en curso).
+    bool read_months(int year, const std::vector<int>& months, bool require_sfc, bool resilient,
+                     AtmosphericField3D& field, int* months_loaded);
 
     std::string data_dir_;
     bool strict_ = false;

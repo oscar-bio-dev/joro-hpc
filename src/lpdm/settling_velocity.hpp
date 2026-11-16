@@ -1,6 +1,7 @@
 #pragma once
 
 #include "common/types.hpp"
+#include "lpdm/device_math.hpp"
 #include <cmath>
 
 namespace joro::lpdm {
@@ -23,6 +24,7 @@ namespace joro::lpdm {
     float rho_air = static_cast<float>(constants::rho_air_sfc),
     float mu_air = static_cast<float>(constants::mu_air)) noexcept
 {
+    (void)rho_air;
     // Conversión de masa a kg
     const float mass_kg = mass_mg * 1.0e-6f;
     const float weight_n = mass_kg * static_cast<float>(constants::g);
@@ -33,13 +35,14 @@ namespace joro::lpdm {
     // Resistencia viscosa por unidad de longitud según régimen laminar de Stokes-Oseen
     // C_drag_silk ~ 4*pi*mu / (ln(L/d) + 0.5)
     const float aspect_ratio = (silk_len_m > 0.01f) ? (silk_len_m / d_silk) : 1000.0f;
-    const float log_aspect = std::log(aspect_ratio);
-    const float drag_coef_silk = (4.0f * static_cast<float>(M_PI) * mu_air * silk_len_m) / (log_aspect + 0.5f);
+    constexpr float kPi = 3.14159265358979f;
+    const float log_aspect = jm::log(aspect_ratio);
+    const float drag_coef_silk = (4.0f * kPi * mu_air * silk_len_m) / (log_aspect + 0.5f);
 
     // Resistencia del cuerpo de la araña (esfera equivalente modificada por postura chi)
     // Radio corporal r_body ~ (3 * M / (4 * pi * rho_spider))^(1/3), con rho_spider ~ 1000 kg/m^3
-    const float r_body = std::cbrt((3.0f * mass_kg) / (4.0f * static_cast<float>(M_PI) * 1000.0f));
-    const float drag_coef_body = 6.0f * static_cast<float>(M_PI) * mu_air * r_body * (1.0f + 0.5f * (1.0f - posture_chi));
+    const float r_body = jm::cbrt((3.0f * mass_kg) / (4.0f * kPi * 1000.0f));
+    const float drag_coef_body = 6.0f * kPi * mu_air * r_body * (1.0f + 0.5f * (1.0f - posture_chi));
 
     const float total_drag_resistance = drag_coef_silk + drag_coef_body;
 

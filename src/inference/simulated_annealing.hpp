@@ -7,6 +7,7 @@
 #include "inference/cost_function.hpp"
 #include "inference/occupancy_model.hpp"
 #include <array>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -137,8 +138,13 @@ struct SimulatedAnnealingReport {
 struct CalibrationObservation {
     int32_t cell_id;
     int16_t year;
-    uint8_t y_detected;
-    int32_t effort_araneae;
+    uint8_t y_detected;          ///< Presencia anual consolidada GBIF + iNaturalist + EDDMapS (y_joro_detected)
+    int32_t joro_count;          ///< Abundancia reportada en la celda-año
+    int32_t effort_araneae;      ///< C^Araneae (heredado; incluye los propios registros de T. clavata)
+    int32_t effort_exogenous;    ///< E^{-J} = max(0, C^Araneae - C^J): esfuerzo exógeno sin circularidad (M13)
+    float cpue_joro;             ///< log(1 + joro_count) / log(1 + max(1, E^{-J}))
+    uint8_t y_cumulative_obs;    ///< Huella acumulada max_{tau<=t} Y_tau
+    float tau_invasion_age;      ///< Años desde la primera detección local (habituación de observadores)
     float centroid_lon;
     float centroid_lat;
     float z_imp;
@@ -149,6 +155,60 @@ struct CalibrationObservation {
 };
 
 std::vector<CalibrationObservation> load_calibration_dataset(const std::string& csv_path);
+
+/// Opciones de dispersión de una evaluación del costo J(theta): LPDM puro (por defecto), kernel isotrópico nulo
+/// (`iso_lambda_km > 0`) y/o kernel mixto humano (`p_h > 0`: A_total = (1-p_h) A_LPDM + p_h A_hum).
+struct DispersalOptions {
+    double iso_lambda_km = 0.0;
+    double p_h = 0.0;
+    double lambda_h_km = 150.0;
+};
+
+/// Evaluador reutilizable de la función multicriterio J(theta) de calibración 2014-2019 (la MISMA que optimiza el
+/// recocido simulado). Permite calibrar comparadores nulos (kernel isotrópico) y el kernel mixto bajo el mismo criterio.
+/// Las referencias pasadas deben sobrevivir al evaluador. `lpdm_engine` es necesario salvo para el kernel isotrópico.
+class CalibrationEvaluator {
+public:
+    CalibrationEvaluator(const std::vector<GridCell>& grid_cells,
+                         const std::vector<io::DailyThermalGrid>& thermal_by_year,
+                         const std::vector<CalibrationObservation>& observations,
+                         lpdm::LpdmEngine* lpdm_engine,
+                         abm::CarryingModel model = abm::CarryingModel::M1);
+    ~CalibrationEvaluator();
+    CalibrationEvaluator(const CalibrationEvaluator&) = delete;
+    CalibrationEvaluator& operator=(const CalibrationEvaluator&) = delete;
+
+    /// J(theta) normalizado con las escalas de referencia del punto nominal (LPDM puro): comparable entre kernels
+    [[nodiscard]] CostComponents evaluate(const std::vector<float>& theta, const DispersalOptions& options = {});
+    [[nodiscard]] const std::vector<CalibrationParamDef>& params() const noexcept;
+    [[nodiscard]] const CostReferenceScales& reference_scales() const noexcept;
+    /// Telemetría ACUMULADA (ABM, costo y fases del motor LPDM: init host, H2D, kernel, D2H, reducción) para el perfilado
+    [[nodiscard]] ChainTelemetry telemetry() const;
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
+
+/// Calibra λ del kernel exponencial isotrópico nulo minimizando J(theta_map) en 2014-2019 (mismo criterio que JORO-HPC).
+struct NullKernelCalibration {
+    double best_lambda_km = 0.0;
+    double best_cost = 0.0;
+    std::vector<std::pair<double, double>> scan;   ///< (lambda_km, J)
+};
+[[nodiscard]] NullKernelCalibration calibrate_isotropic_null_kernel(
+    CalibrationEvaluator& evaluator, const std::vector<float>& theta_map, const std::vector<double>& lambda_candidates_km);
+
+/// Calibra (p_h, lambda_h) del kernel mixto humano sobre una rejilla, minimizando J(theta_map) en 2014-2019.
+struct MixedKernelCalibration {
+    double best_p_h = 0.0;
+    double best_lambda_h_km = 150.0;
+    double best_cost = 0.0;
+    double cost_without_human = 0.0;
+};
+[[nodiscard]] MixedKernelCalibration calibrate_mixed_human_kernel(
+    CalibrationEvaluator& evaluator, const std::vector<float>& theta_map,
+    const std::vector<double>& p_h_candidates, const std::vector<double>& lambda_h_candidates_km);
 
 /// Ejecuta el algoritmo de Recocido Simulado Multi-inicio (5 cadenas INDEPENDIENTES ejecutadas
 /// de forma SECUENCIAL). Cada evaluación del simulador acoplado usa el 100 % del hardware:

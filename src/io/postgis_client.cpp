@@ -28,6 +28,7 @@ bool PostgisClient::connect() {
         return false;
     }
 #else
+    (void)port_;
     std::cout << "[PostGIS] Modo simulación (libpqxx no enlazado en compilación).\n";
     is_connected_ = true;
     return true;

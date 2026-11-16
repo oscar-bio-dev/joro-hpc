@@ -124,6 +124,52 @@ int main() {
         for (const auto& kv : g3.arrivals_per_cell) arrivals += kv.second;
         JORO_TEST_ASSERT(arrivals <= g3.total_landed, "Llegadas por celda exceden los aterrizajes");
     }
+
+    // ── Caso 4: viento superficial >= u_crit en TODA la temporada => retención local sin vuelo distante (M3) ──
+    {
+        joro::io::AtmosphericField3D atm;
+        atm.n_times = 120; atm.n_levels = 12; atm.n_lats = 81; atm.n_lons = 101;   // 5 días (> 24 h de margen: modo estacional)
+        atm.pressure_levels_hpa = {1000, 975, 950, 925, 900, 875, 850, 825, 800, 775, 750, 700};
+        for (int i = 0; i < atm.n_lats; ++i) atm.lats.push_back(45.0f - 0.25f * static_cast<float>(i));
+        for (int j = 0; j < atm.n_lons; ++j) atm.lons.push_back(-95.0f + 0.25f * static_cast<float>(j));
+        const size_t hp = static_cast<size_t>(atm.n_lats) * atm.n_lons;
+        const size_t total = static_cast<size_t>(atm.n_times) * atm.n_levels * hp;
+        atm.u.assign(total, 5.0f); atm.v.assign(total, 1.0f); atm.w.assign(total, 0.01f);
+        atm.sp.assign(static_cast<size_t>(atm.n_times) * hp, 101325.0f);
+        atm.blh.assign(static_cast<size_t>(atm.n_times) * hp, 1000.0f);
+        atm.u10.assign(static_cast<size_t>(atm.n_times) * hp, 5.0f);   // 5 m/s >= 3 m/s en todas las horas
+        atm.v10.assign(static_cast<size_t>(atm.n_times) * hp, 0.0f);
+
+        auto cpu4 = joro::lpdm::create_cpu_baseline_engine();
+        auto gpu4 = joro::lpdm::create_sycl_gpu_engine();
+        JORO_TEST_ASSERT(cpu4->set_atmosphere(atm) && gpu4->set_atmosphere(atm), "Caso 4: ERA5 sintético rechazado");
+        constexpr uint32_t n4 = 3000;
+        std::unordered_map<int32_t, uint32_t> release4;
+        release4[5] = n4;
+        cpu4->initialize_particles(cells, release4);
+        gpu4->initialize_particles(cells, release4);
+        auto c4 = cpu4->run_dispersion(atm, 60.0f, 480);
+        auto g4 = gpu4->run_dispersion(atm, 60.0f, 480);
+        for (const auto* r : {&c4, &g4}) {
+            JORO_TEST_ASSERT(r->total_retained == n4 && r->total_landed == n4 && r->total_escaped == 0,
+                             "Caso 4: con ws10 >= u_crit toda la cohorte debe quedar retenida localmente");
+            JORO_TEST_ASSERT(r->mean_jump_distance_km == 0.0f, "Caso 4: los retenidos se excluyen del diagnóstico de vuelo efectivo");
+            JORO_TEST_ASSERT(r->arrivals_per_cell.size() == 1 && r->arrivals_per_cell.at(5) == n4,
+                             "Caso 4: la retención cuenta en la celda de origen para el balance del ABM");
+        }
+        // Con viento calmo (ws10 < u_crit) NO hay retención y sí vuelo efectivo
+        atm.u10.assign(static_cast<size_t>(atm.n_times) * hp, 1.0f);
+        auto cpu5 = joro::lpdm::create_cpu_baseline_engine();
+        auto gpu5 = joro::lpdm::create_sycl_gpu_engine();
+        cpu5->set_atmosphere(atm); gpu5->set_atmosphere(atm);
+        cpu5->initialize_particles(cells, release4); gpu5->initialize_particles(cells, release4);
+        auto c5 = cpu5->run_dispersion(atm, 60.0f, 480);
+        auto g5 = gpu5->run_dispersion(atm, 60.0f, 480);
+        JORO_TEST_ASSERT(c5.total_retained == 0 && g5.total_retained == 0, "Caso 4b: sin viento fuerte no hay retención");
+        JORO_TEST_ASSERT(c5.total_landed + c5.total_escaped == n4 && g5.total_landed + g5.total_escaped == n4, "Caso 4b: conservación");
+        std::cout << "  Retención local (ws10 >= 3 m/s): CPU " << c4.total_retained << " | GPU " << g4.total_retained
+                  << " de " << n4 << " | con calma: vuelo medio CPU " << c5.mean_jump_distance_km << " km, GPU " << g5.mean_jump_distance_km << " km\n";
+    }
 #else
     std::cout << "  [Nota] Binario compilado sin SYCL (CPU-only). Equivalencia GPU verificada en CI oneAPI.\n";
 #endif

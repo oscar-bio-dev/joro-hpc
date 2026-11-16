@@ -12,9 +12,11 @@ namespace joro::lpdm {
 /// Resultado de la simulación de dispersión aérea anual
 struct DispersionResult {
     uint64_t total_released = 0;
-    uint64_t total_landed = 0;
-    uint64_t total_escaped = 0;
+    uint64_t total_landed = 0;    ///< Aterrizados = aterrizajes tras vuelo + retenidos localmente (balance demográfico del ABM)
+    uint64_t total_escaped = 0;   ///< Aún en suspensión al terminar la ventana de vuelo
+    uint64_t total_retained = 0;  ///< Retención local: viento >= u_crit en todos los días candidatos (sin vuelo distante)
     
+    /// Diagnósticos de vuelo EFECTIVO: excluyen a los retenidos (total_landed - total_retained es el denominador)
     float mean_jump_distance_km = 0.0f;
     float p95_jump_distance_km = 0.0f;
     double kernel_time_s = 0.0; ///< Tiempo exclusivo de integración de trayectorias (GPU vs CPU)
@@ -87,10 +89,39 @@ public:
     virtual bool select_atmosphere(size_t /*index*/) { return false; }
     [[nodiscard]] virtual size_t atmosphere_count() const noexcept { return 0; }
 
+    /// Empaqueta el campo en FP16 y libera de inmediato el `AtmosphericField3D` temporal del llamador
+    /// (evita retener ~2.6 GiB de float32 por año una vez construido el Era5Pack comprimido).
+    bool add_atmosphere_and_release(io::AtmosphericField3D& atmosphere) {
+        const bool ok = add_atmosphere(atmosphere);
+        atmosphere.clear_and_shrink();
+        return ok;
+    }
+
+    /// Huella de memoria de los campos ERA5 empaquetados en FP16: RAM host (todos los años) y VRAM Device USM
+    /// actualmente ocupada por los DeviceSlot (0 en el motor CPU).
+    [[nodiscard]] virtual size_t atmosphere_host_bytes() const noexcept { return 0; }
+    [[nodiscard]] virtual size_t atmosphere_device_bytes() const noexcept { return 0; }
+
+    /// Semillas dinámicas (M8): réplica Monte Carlo y desplazamiento del índice de año en el generador.
+    /// Por defecto year_idx = índice de la atmósfera activa; `set_year_index` lo fija explícitamente.
+    virtual void set_mc_seed(uint32_t /*mc_seed*/) {}
+
+    /// Paso temporal (h) con que se almacenan los campos ERA5 en FP16 (1 = serie horaria completa; por defecto lo fija
+    /// JORO_ERA5_TIME_STRIDE). Debe fijarse ANTES de add_atmosphere. Con 3 h los 6 años de calibración (3.64 GiB) quedan
+    /// 100 % residentes en la VRAM de la Arc A380: 0 transferencias H2D por evaluación.
+    virtual void set_era5_time_stride(int /*hours*/) {}
+
+    /// Emergencia escalonada: inicio de la ventana de despegue por celda [h tras el 1 de mayo 00 UTC], producido por el
+    /// ABM (desarrollo térmico acumulado). Debe fijarse ANTES de `initialize_particles`; el mapa vacío => 0 h para todas.
+    virtual void set_emergence_offsets(const std::unordered_map<int32_t, float>& /*start_hours*/) {}
+    virtual void set_year_index(uint32_t /*year_idx*/) {}
+
     /// Presupuesto máximo de super-partículas por despacho anual; si se excede, se reduce su número
     /// y se escala su peso (la suma de pesos por celda se conserva exactamente). 0 = sin presupuesto.
+    /// Política idéntica en CPU y GPU (superparticle_policy.hpp); el modo v2.0 admite hasta 5e6.
     virtual void set_max_super_particles(size_t /*budget*/) {}
 };
+
 
 /// Crea el motor de referencia en CPU (OpenMP SIMD)
 std::unique_ptr<LpdmEngine> create_cpu_baseline_engine();

@@ -22,6 +22,7 @@
 #include "inference/simulated_annealing.hpp"
 
 #include <iostream>
+#include <omp.h>
 #include <iomanip>
 #include <sstream>
 #include <chrono>
@@ -222,6 +223,44 @@ static float effective_k(const joro::abm::AbmEngine& abm, const joro::GridCell& 
     return joro::abm::compute_carrying_capacity(cell, cc);
 }
 
+/// Lee `"map_theta": [...]` desde `calibration_summary_M1.json` si está disponible.
+static std::vector<float> load_m1_map_theta_if_available() {
+    const std::string ckpt_dir = joro::env_or("JORO_CHECKPOINT_DIR", "/mnt/hpc_scratch/joro-hpc/checkpoints/");
+    std::ifstream f(ckpt_dir + "calibration_summary_M1.json");
+    if (!f.is_open()) return {};
+    std::ostringstream ss;
+    ss << f.rdbuf();
+    const std::string txt = ss.str();
+    const size_t key = txt.find("\"map_theta\"");
+    if (key == std::string::npos) return {};
+    const size_t lb = txt.find('[', key);
+    const size_t rb = (lb != std::string::npos) ? txt.find(']', lb) : std::string::npos;
+    if (lb == std::string::npos || rb == std::string::npos || rb <= lb) return {};
+    std::vector<float> out;
+    std::stringstream vs(txt.substr(lb + 1, rb - lb - 1));
+    std::string tok;
+    while (std::getline(vs, tok, ',')) {
+        try { out.push_back(std::stof(tok)); } catch (...) { return {}; }
+    }
+    return (out.size() == 9) ? out : std::vector<float>{};
+}
+
+static joro::abm::DemographicParameters calibrated_or_default_m1_params() {
+    joro::abm::DemographicParameters p;
+    const auto theta = load_m1_map_theta_if_available();
+    if (theta.size() == 9) {
+        p.t_c          = theta[0];
+        p.alpha_damage = theta[1];
+        p.beta_damage  = std::clamp(static_cast<int>(std::lround(theta[2])), 1, 3);
+        p.k0           = theta[3];
+        p.gamma_hab    = theta[4];
+        p.q_balloon    = theta[5];
+        p.q_viab       = theta[6];
+        p.use_hab_index = true;
+    }
+    return p;
+}
+
 /// Experimento de Transecto Latitudinal y Saturación: simulación REAL del ABM (2014–2019) con forzamiento
 /// térmico diario ERA5 por año. Sin valores prescritos: toda cifra impresa se calcula en esta función.
 ///   Tabla 1/1b: epicentro (celda semilla activa) y celda testigo B, acoplados al LPDM (dinámica continental).
@@ -261,7 +300,13 @@ void execute_latitudinal_transect_experiment(
         return;
     }
 
-    joro::abm::AbmEngine abm_engine;
+    const auto m1_params = calibrated_or_default_m1_params();
+    std::cout << "[Transecto] Parámetros M1 activos: T_c = " << std::fixed << std::setprecision(2) << m1_params.t_c
+              << " °C, alpha_s = " << std::setprecision(4) << m1_params.alpha_damage << ", beta_s = " << m1_params.beta_damage
+              << ", K0 = " << std::setprecision(0) << m1_params.k0 << ", gamma_hab = " << std::setprecision(3) << m1_params.gamma_hab
+              << ", q_balloon = " << m1_params.q_balloon << ", q_viab = " << m1_params.q_viab
+              << ", delta_dosel = " << std::setprecision(2) << m1_params.delta_dosel << ", delta_imp = " << m1_params.delta_imp << "\n";
+    joro::abm::AbmEngine abm_engine(m1_params);
     abm_engine.initialize_seed(grid_cells, 0.15f);
     abm_engine.inject_test_cohort(cell_b->cell_id, kStdCohort);   // cohorte testigo explícita en B
     const float k_a = effective_k(abm_engine, *cell_a);
@@ -280,8 +325,8 @@ void execute_latitudinal_transect_experiment(
     for (int year = y0; year <= y1; ++year) {
         const auto& thermal = thermals[static_cast<size_t>(year - y0)];
         joro::io::AtmosphericField3D atmosphere;
-        if (!era5_reader.load_month(year, 5, atmosphere)) {
-            std::cerr << "[Transecto] ERROR: tensor atmosférico ERA5 de " << year << "-05 no disponible.\n";
+        if (!era5_reader.load_season(year, {5, 6, 7}, atmosphere)) {
+            std::cerr << "[Transecto] ERROR: tensor atmosférico ERA5 estacional de " << year << " (mayo-julio) no disponible.\n";
             return;
         }
         const auto snap_a = snapshot_oothecae(abm_engine.cohorts(), cell_a->cell_id);
@@ -291,8 +336,9 @@ void execute_latitudinal_transect_experiment(
         const auto wo_a = winter_outcome(abm_engine.cohorts(), snap_a);
         const auto wo_b = winter_outcome(abm_engine.cohorts(), snap_b);
 
+        engine->set_emergence_offsets(spring.emergence_hours_per_cell);
         engine->initialize_particles(grid_cells, spring.ballooners_per_cell);
-        const int steps = std::min(168, std::max(60, atmosphere.n_times));
+        const int steps = 480;
         auto disp = engine->run_dispersion(atmosphere, static_cast<float>(config.lpdm_dt_seconds), steps);
         abm_engine.deposit_arrivals(disp.arrivals_per_cell);
 
@@ -369,7 +415,7 @@ void execute_latitudinal_transect_experiment(
         double tmin_mean_sum = 0; float tmin_ext = 1e9f;
     };
     std::vector<Site> sites;
-    joro::abm::AbmEngine iso;                     // motor aislado: sin semilla continental ni LPDM
+    joro::abm::AbmEngine iso(m1_params);          // motor aislado: sin semilla continental ni LPDM, mismos parámetros M1 calibrados
     for (const auto& sp : specs) {
         Site s; s.spec = sp; s.cell = nearest_cell(grid_cells, sp.lat, sp.lon, false);
         if (!s.cell) { std::cerr << "[Transecto] ERROR: sin celda cercana a " << sp.lat << "°N.\n"; return; }
@@ -530,6 +576,7 @@ int main(int argc, char* argv[]) {
     bool run_transect = false;
     bool run_morris = false;
     bool run_calibration = true;
+    bool benchmark_single_eval = false; // --benchmark-single-eval: perfila UNA evaluación completa de J(theta) (6 años)
     bool calibration_only = false; // --calibrate: solo calibración inversa (omite los ciclos continentales de humo)
     // Modelos de capacidad de carga (Sección 8.4): --model M1 (principal) | M0 | M3 | all (M1 + M0 + M3)
     std::vector<joro::abm::CarryingModel> models = {joro::abm::CarryingModel::M1};
@@ -549,6 +596,7 @@ int main(int argc, char* argv[]) {
         else if (arg == "--diagnostics" || arg == "--phase3") { run_transect = true; run_morris = true; run_calibration = false; }
         else if (arg == "--calibrate" || arg == "--phase4") { run_transect = false; run_morris = false; run_calibration = true; calibration_only = true; }
         else if (arg == "--no-calibration") run_calibration = false;
+        else if (arg == "--benchmark-single-eval") { benchmark_single_eval = true; run_transect = false; run_morris = false; run_calibration = true; calibration_only = true; }
         else if (arg == "--model" && i + 1 < argc) {
             const std::string m = argv[++i];
             if (m == "M0") models = {joro::abm::CarryingModel::M0};
@@ -578,11 +626,22 @@ int main(int argc, char* argv[]) {
     db_client.load_grid(grid_cells);
     std::cout << "[Malla] " << grid_cells.size() << " celdas demográficas cargadas en memoria.\n";
 
-    // Índice compuesto ortogonalizado de hábitat H_hab = std_norm(0.50 Z_borde + 0.30 Z_imp + 0.20 Z_dosel)
+    // Conjunto de calibración (se carga una sola vez): define el soporte informativo S de H_hab (M14)
+    const std::string obs_csv = "/mnt/hpc_scratch/joro-hpc/calibration_set_2014_2019.csv";
+    std::vector<joro::inference::CalibrationObservation> observations = joro::inference::load_calibration_dataset(obs_csv);
+
+    // Índice compuesto de hábitat H_hab = (h - m_S)/s_S, h = 0.50 Z_borde + 0.30 Z_imp + 0.20 Z_dosel, estandarizado
+    // sobre el soporte informativo S (celdas con esfuerzo exógeno en el dominio de calibración) para que m_S = 0 (M14)
     {
-        const auto [h_mean, h_sd] = joro::abm::compute_habitat_index(grid_cells);
-        std::cout << "[Malla] H_hab estandarizado sobre " << grid_cells.size() << " celdas (combinación cruda: media "
-                  << h_mean << ", sd " << h_sd << ").\n";
+        std::vector<int32_t> support_ids;
+        for (const auto& o : observations) if (o.effort_exogenous > 0) support_ids.push_back(o.cell_id);
+        std::vector<uint8_t> support_mask;
+        if (!support_ids.empty()) support_mask = joro::abm::make_support_mask(grid_cells, support_ids);
+        const auto [h_mean, h_sd] = joro::abm::compute_habitat_index(grid_cells, support_ids.empty() ? nullptr : &support_mask);
+        size_t n_support = 0;
+        for (uint8_t v : support_mask) n_support += v;
+        std::cout << "[Malla] H_hab estandarizado sobre el soporte S (" << (support_ids.empty() ? grid_cells.size() : n_support)
+                  << " de " << grid_cells.size() << " celdas; combinación cruda: m_S = " << h_mean << ", s_S = " << h_sd << ").\n";
     }
 
     // 3. Inicializar lector de tensores ERA5 (NetCDF4)
@@ -668,8 +727,7 @@ int main(int argc, char* argv[]) {
         std::cout << "▶ INGESTA OBSERVACIONAL Y CALIBRACIÓN INVERSA MULTI-INICIO\n";
         std::cout << "===================================================================\n";
 
-        std::string obs_csv = "/mnt/hpc_scratch/joro-hpc/calibration_set_2014_2019.csv";
-        auto observations = joro::inference::load_calibration_dataset(obs_csv);
+        if (observations.empty()) observations = joro::inference::load_calibration_dataset(obs_csv);
 
         if (observations.empty()) {
             std::cerr << "[Calibración] Error: Dataset observacional vacío en " << obs_csv << "\n";
@@ -691,12 +749,61 @@ int main(int argc, char* argv[]) {
         lpdm_gpu->clear_atmospheres();
         for (int yi = 0; yi < 6; ++yi) {
             joro::io::AtmosphericField3D field_y;
-            if (!era5_reader.load_month(2014 + yi, 5, field_y) || !lpdm_gpu->add_atmosphere(field_y)) {
+            if (!era5_reader.load_season(2014 + yi, {5, 6, 7}, field_y) || !lpdm_gpu->add_atmosphere_and_release(field_y)) {
                 std::cerr << "[Calibración] Error: ERA5 3D/superficial de " << (2014 + yi) << " no utilizable para el LPDM.\n";
                 return EXIT_FAILURE;
             }
         }
         std::cout << "[ERA5] " << lpdm_gpu->atmosphere_count() << " campos 3D+superficiales anuales (2014–2019) residentes en el dispositivo.\n";
+        // ── Perfilado de UNA evaluación completa de J(theta) en 6 años: fracción serial (CPU) vs H2D vs kernel GPU ──
+        if (benchmark_single_eval) {
+            joro::inference::CalibrationEvaluator evaluator(grid_cells, thermal_by_year, observations, lpdm_gpu.get(), models.front());
+            std::vector<float> theta_nominal;
+            for (const auto& d : evaluator.params()) theta_nominal.push_back(d.default_val);
+            // JORO_BENCH_THETA=map: usa el MAP congelado de M1 (población y colonización realistas) en vez del punto nominal
+            if (joro::env_or("JORO_BENCH_THETA", "nominal") == "map" && theta_nominal.size() == 9) {
+                const auto loaded_map = load_m1_map_theta_if_available();
+                theta_nominal = (loaded_map.size() == 9)
+                    ? loaded_map
+                    : std::vector<float>{-2.1747344f, 0.028961826f, 2.0f, 9203.6211f, 0.79627186f, 0.4722499f, 0.35181648f, -1.3290558f, 1.7328026f};
+            }
+            const int n_rep = std::max(1, joro::env_int_or("JORO_BENCH_REPS", 3));
+            (void)evaluator.evaluate(theta_nominal);                      // calentamiento (JIT SYCL, cachés, páginas)
+            const auto tel0 = evaluator.telemetry();
+            const auto t0 = std::chrono::steady_clock::now();
+            for (int r = 0; r < n_rep; ++r) (void)evaluator.evaluate(theta_nominal);
+            const double wall = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() / n_rep;
+            const auto tel1 = evaluator.telemetry();
+            auto per = [&](double a, double b) { return (a - b) / n_rep; };
+            const double abm = per(tel1.abm_time_s, tel0.abm_time_s), cost = per(tel1.cost_time_s, tel0.cost_time_s);
+            const double l_init = per(tel1.lpdm_init_time_s, tel0.lpdm_init_time_s), l_h2d = per(tel1.lpdm_h2d_time_s, tel0.lpdm_h2d_time_s);
+            const double l_ker = per(tel1.lpdm_kernel_time_s, tel0.lpdm_kernel_time_s), l_d2h = per(tel1.lpdm_d2h_time_s, tel0.lpdm_d2h_time_s);
+            const double l_red = per(tel1.lpdm_reduce_time_s, tel0.lpdm_reduce_time_s);
+            const double other = wall - (abm + cost + l_init + l_h2d + l_ker + l_d2h + l_red);
+            const double serial_cpu = abm + cost + l_init + l_red + std::max(0.0, other);
+            auto pct = [&](double x) { return 100.0 * x / wall; };
+            std::cout << std::fixed << std::setprecision(1);
+            std::cout << "\n╔════════════ PERFIL DE UNA EVALUACIÓN COMPLETA DE J(theta) (6 años, media de " << n_rep << ") ════════════╗\n";
+            std::cout << "  Tiempo de pared por evaluación            : " << std::setprecision(3) << wall << " s\n" << std::setprecision(1);
+            std::cout << "  ABM (invierno, Q10, Beverton-Holt; OpenMP): " << std::setw(8) << abm * 1e3 << " ms (" << pct(abm) << " %)\n";
+            std::cout << "  Ocupación + costo + frente (OpenMP)       : " << std::setw(8) << cost * 1e3 << " ms (" << pct(cost) << " %)\n";
+            std::cout << "  LPDM host: preparar lotes de emisión      : " << std::setw(8) << l_init * 1e3 << " ms (" << pct(l_init) << " %)\n";
+            std::cout << "  LPDM host: reducir llegadas (mapa disperso): " << std::setw(7) << l_red * 1e3 << " ms (" << pct(l_red) << " %)\n";
+            std::cout << "  Transferencia H2D (PCIe: lotes + año ERA5) : " << std::setw(7) << l_h2d * 1e3 << " ms (" << pct(l_h2d) << " %)\n";
+            std::cout << "  Kernel SYCL en la Intel Arc A380           : " << std::setw(7) << l_ker * 1e3 << " ms (" << pct(l_ker) << " %)\n";
+            std::cout << "  Transferencia D2H (resultados)             : " << std::setw(7) << l_d2h * 1e3 << " ms (" << pct(l_d2h) << " %)\n";
+            std::cout << "  Otros (asignación, mapas, sincronización)  : " << std::setw(7) << other * 1e3 << " ms (" << pct(other) << " %)\n";
+            std::cout << "  ► Fracción SERIAL en CPU (ABM+costo+host)  : " << pct(serial_cpu) << " %  | GPU útil (kernel): " << pct(l_ker)
+                      << " % | PCIe (H2D+D2H): " << pct(l_h2d + l_d2h) << " %\n";
+            std::cout << "  Súper-partículas por evaluación           : " << (tel1.particles_dispatched - tel0.particles_dispatched) / static_cast<uint64_t>(n_rep)
+                      << " | despachos con tope adaptativo: " << (tel1.capped_dispatches - tel0.capped_dispatches) / static_cast<uint64_t>(n_rep)
+                      << " | fallbacks a CPU: " << (tel1.cpu_fallbacks - tel0.cpu_fallbacks) << "\n";
+            std::cout << "  Hilos OpenMP: " << omp_get_max_threads() << " | VRAM ERA5 residente: "
+                      << std::setprecision(2) << (static_cast<double>(lpdm_gpu->atmosphere_device_bytes()) / 1073741824.0) << " GiB\n";
+            std::cout << "╚════════════════════════════════════════════════════════════════════════════════════════╝\n";
+            return EXIT_SUCCESS;
+        }
+
 
         // Las 5 cadenas se ejecutan secuencialmente; cada evaluación usa la GPU (LPDM) y todos los hilos OpenMP.
         // Se calibra cada modelo candidato de K_i solicitado; el primero (M1 por defecto) es el principal.
@@ -708,7 +815,7 @@ int main(int argc, char* argv[]) {
         if (const char* e = std::getenv("JORO_SA_CHAINS")) sa_chains = std::max(1, std::atoi(e));
         if (const char* e = std::getenv("JORO_SA_ITERS")) sa_iters = std::max(10, std::atoi(e));
         try {
-            const std::string ckpt_dir = "/mnt/hpc_scratch/joro-hpc/checkpoints/";
+            const std::string ckpt_dir = joro::env_or("JORO_CHECKPOINT_DIR", "/mnt/hpc_scratch/joro-hpc/checkpoints/");
             const std::string ckpt = main_model && cal_model == joro::abm::CarryingModel::M1
                 ? ckpt_dir + "theta_compatible_ensemble.csv"
                 : ckpt_dir + "theta_compatible_ensemble_" + joro::abm::carrying_model_name(cal_model) + ".csv";
@@ -721,7 +828,7 @@ int main(int argc, char* argv[]) {
         }
 
         write_calibration_summary_json(
-            std::string("/mnt/hpc_scratch/joro-hpc/checkpoints/calibration_summary_") +
+            joro::env_or("JORO_CHECKPOINT_DIR", "/mnt/hpc_scratch/joro-hpc/checkpoints/") + std::string("calibration_summary_") +
                 joro::abm::carrying_model_name(cal_model) + ".json",
             sa_report, era5_strict, config.era5_dir, era5_reader.files_read(), era5_reader.blocked_year_requests());
         if (!main_model) {
@@ -830,7 +937,7 @@ int main(int argc, char* argv[]) {
         // ─────────────────────────────────────────────────────────────────────
         // TABLA 7: TELEMETRÍA HÍBRIDA CPU (OpenMP + AVX-512) + GPU (SYCL / Level-Zero)
         // ─────────────────────────────────────────────────────────────────────
-        constexpr double kLpdmStepsPerEval = 168.0;
+        constexpr double kLpdmStepsPerEval = 480.0;
         std::cout << "\nTABLA 7: TELEMETRÍA HÍBRIDA CPU (" << sa_report.omp_max_threads << " hilos OpenMP) + GPU (" << sa_report.device_description << "):\n";
         std::cout << "┌────────┬──────────┬──────────┬──────────┬──────────┬──────────┬──────────┬──────────┬────────────┬──────────────┐\n";
         std::cout << "│ Cadena │ Total(s) │ ABM CPU  │ GPU kern │ H2D+D2H  │ LPDM host│ Costo CPU│ GPU kern │ Super-part │ Mpart/s      │\n";
@@ -868,7 +975,7 @@ int main(int argc, char* argv[]) {
                       << (sa_report.total_runtime_s > 0.0 ? 100.0 * (tt.lpdm_h2d_time_s + tt.lpdm_d2h_time_s) / sa_report.total_runtime_s : 0.0)
                       << " % | kernel GPU "
                       << (sa_report.total_runtime_s > 0.0 ? 100.0 * tt.lpdm_kernel_time_s / sa_report.total_runtime_s : 0.0) << " %\n";
-            std::cout << "  ✔ Throughput del kernel GPU: " << std::setprecision(2) << kern_mps_steps << " M part-pasos/s (60 pasos de 60 s)\n";
+            std::cout << "  ✔ Throughput del kernel GPU: " << std::setprecision(2) << kern_mps_steps << " M part-pasos/s (480 pasos de 60 s)\n";
             std::cout << "  ✔ Balance entre cadenas: min " << std::setprecision(2) << tmin << " s | media " << tmean << " s | max " << tmax
                       << " s | max/min = " << (tmin > 0.0 ? tmax / tmin : 0.0) << "\n";
         }

@@ -2,12 +2,57 @@
 #include <cstdlib>
 #include <iostream>
 #include <cmath>
+#include <filesystem>
 
 #if defined(JORO_HAS_NETCDF)
 #include <netcdf.h>
 #endif
 
 namespace joro::io {
+
+#if defined(JORO_HAS_NETCDF)
+namespace {
+
+[[nodiscard]] bool is_supported_nc_numeric(nc_type xt) noexcept {
+    return xt == NC_FLOAT || xt == NC_DOUBLE || xt == NC_SHORT ||
+           xt == NC_INT || xt == NC_USHORT || xt == NC_UINT ||
+           xt == NC_BYTE || xt == NC_UBYTE;
+}
+
+void query_cf_scale_offset(int ncid, int varid, bool& has_cf, double& scale, double& offset) noexcept {
+    scale = 1.0;
+    offset = 0.0;
+    const bool has_s = (nc_get_att_double(ncid, varid, "scale_factor", &scale) == NC_NOERR);
+    const bool has_o = (nc_get_att_double(ncid, varid, "add_offset", &offset) == NC_NOERR);
+    has_cf = (has_s && std::abs(scale - 1.0) > 1e-12) || (has_o && std::abs(offset) > 1e-12);
+}
+
+bool read_nc_var_cf(int ncid, int varid, size_t n_elems, float* dst,
+                    const size_t* start = nullptr, const size_t* count = nullptr) noexcept
+{
+    if (varid < 0 || !dst) return false;
+    nc_type xt = NC_NAT;
+    if (nc_inq_vartype(ncid, varid, &xt) != NC_NOERR || !is_supported_nc_numeric(xt)) return false;
+
+    const int rc = (start && count)
+                       ? nc_get_vara_float(ncid, varid, start, count, dst)
+                       : nc_get_var_float(ncid, varid, dst);
+    if (rc != NC_NOERR) return false;
+
+    bool has_cf = false;
+    double scale = 1.0, offset = 0.0;
+    query_cf_scale_offset(ncid, varid, has_cf, scale, offset);
+    if (has_cf) {
+        #pragma omp parallel for schedule(static)
+        for (size_t i = 0; i < n_elems; ++i) {
+            dst[i] = static_cast<float>(static_cast<double>(dst[i]) * scale + offset);
+        }
+    }
+    return true;
+}
+
+} // namespace
+#endif
 
 Era5NetCdfReader::Era5NetCdfReader(std::string data_dir)
     : data_dir_(std::move(data_dir)) {}
@@ -37,171 +82,246 @@ bool Era5NetCdfReader::year_allowed(int year) {
     return false;
 }
 
+bool Era5NetCdfReader::read_months(int year, const std::vector<int>& months, bool require_sfc, bool resilient,
+                                   AtmosphericField3D& field, int* months_loaded)
+{
+    if (months_loaded) *months_loaded = 0;
+#if defined(JORO_HAS_NETCDF)
+    struct Probe {
+        int month = 0;
+        std::string f3d, fsfc;
+        size_t nt = 0, nlev = 0, nlat = 0, nlon = 0;
+        bool has_sfc = false;
+    };
+    auto mm = [](int m) { return std::string(m < 10 ? "0" : "") + std::to_string(m); };
+    auto probe_dims = [](int ncid, size_t& nt, size_t& nlev, size_t& nlat, size_t& nlon) {
+        int d = -1;
+        bool ok = nc_inq_dimid(ncid, "valid_time", &d) == NC_NOERR && nc_inq_dimlen(ncid, d, &nt) == NC_NOERR;
+        if (ok) ok = nc_inq_dimid(ncid, "pressure_level", &d) == NC_NOERR && nc_inq_dimlen(ncid, d, &nlev) == NC_NOERR;
+        if (ok) ok = nc_inq_dimid(ncid, "latitude", &d) == NC_NOERR && nc_inq_dimlen(ncid, d, &nlat) == NC_NOERR;
+        if (ok) ok = nc_inq_dimid(ncid, "longitude", &d) == NC_NOERR && nc_inq_dimlen(ncid, d, &nlon) == NC_NOERR;
+        return ok && nt > 0 && nlev > 0 && nlat > 0 && nlon > 0;
+    };
+
+    // ── Fase 1: sondeo de los meses disponibles (solo archivos cerrados .nc; los .part nunca coinciden con el patrón)
+    std::vector<Probe> probes;
+    for (size_t mi = 0; mi < months.size(); ++mi) {
+        Probe pr;
+        pr.month = months[mi];
+        pr.f3d = data_dir_ + "/era5_uvwt_" + std::to_string(year) + "_" + mm(pr.month) + ".nc";
+        pr.fsfc = data_dir_ + "/era5_sfc_" + std::to_string(year) + "_" + mm(pr.month) + ".nc";
+
+        int nc3 = 0;
+        int st = nc_open(pr.f3d.c_str(), NC_NOWRITE, &nc3);
+        if (st != NC_NOERR && !strict_ && mi == 0) {
+            const std::string alt = data_dir_ + "/era5_uvwt_" + std::to_string(year) + "_" + mm(pr.month) + "_01.nc";
+            if (nc_open(alt.c_str(), NC_NOWRITE, &nc3) == NC_NOERR) { pr.f3d = alt; st = NC_NOERR; }
+        }
+        bool usable = (st == NC_NOERR);
+        if (usable) {
+            usable = probe_dims(nc3, pr.nt, pr.nlev, pr.nlat, pr.nlon);
+            nc_close(nc3);
+        } else if (mi == 0 || !resilient) {
+            if (strict_) {
+                std::cerr << "[NetCDF] ERROR (modo estricto): no se pudo abrir " << pr.f3d << " (" << nc_strerror(st) << ").\n";
+            } else {
+                std::cerr << "[NetCDF] Advertencia: No se pudo abrir " << pr.f3d << " (" << nc_strerror(st)
+                          << "). Usando inicialización sintética de respaldo.\n";
+            }
+        }
+        if (usable) {
+            int ncs = 0;
+            if (nc_open(pr.fsfc.c_str(), NC_NOWRITE, &ncs) == NC_NOERR) {
+                int dvt = -1, dla = -1, dlo = -1;
+                size_t nts = 0, nla = 0, nlo = 0;
+                pr.has_sfc = nc_inq_dimid(ncs, "valid_time", &dvt) == NC_NOERR && nc_inq_dimlen(ncs, dvt, &nts) == NC_NOERR &&
+                             nc_inq_dimid(ncs, "latitude", &dla) == NC_NOERR && nc_inq_dimlen(ncs, dla, &nla) == NC_NOERR &&
+                             nc_inq_dimid(ncs, "longitude", &dlo) == NC_NOERR && nc_inq_dimlen(ncs, dlo, &nlo) == NC_NOERR &&
+                             nts == pr.nt && nla == pr.nlat && nlo == pr.nlon;
+                nc_close(ncs);
+            }
+            if (!pr.has_sfc && (require_sfc || strict_)) {
+                std::cerr << "[NetCDF] " << (strict_ ? "ERROR (modo estricto): " : "Aviso: ")
+                          << "falta o es incompatible el archivo superficial " << pr.fsfc << ".\n";
+                usable = false;
+            }
+        }
+        if (usable && !probes.empty()) {
+            const Probe& f = probes.front();
+            if (pr.nlev != f.nlev || pr.nlat != f.nlat || pr.nlon != f.nlon) {
+                std::cerr << "[NetCDF] Aviso: la malla de " << pr.f3d << " difiere de la del primer mes.\n";
+                usable = false;
+            }
+        }
+        if (!usable) {
+            if (mi == 0 || !resilient) return false;
+            std::cout << "[ERA5] AVISO: mes " << pr.month << " de " << year
+                      << " aún no disponible en disco (descarga en curso); se omiten los meses posteriores.\n";
+            break;
+        }
+        probes.push_back(pr);
+    }
+    if (probes.empty()) return false;
+
+    // ── Fase 2: reserva y lectura cronológica por bloques temporales (conversión omega -> w al vuelo)
+    const size_t nlev = probes.front().nlev, nlat = probes.front().nlat, nlon = probes.front().nlon;
+    const size_t vol = nlev * nlat * nlon, hp = nlat * nlon;
+    size_t nt_total = 0;
+    for (const auto& pr : probes) nt_total += pr.nt;
+    bool want_sfc = true;
+    for (const auto& pr : probes) want_sfc = want_sfc && pr.has_sfc;
+
+    field = AtmosphericField3D{};
+    field.n_levels = static_cast<int>(nlev);
+    field.n_lats = static_cast<int>(nlat);
+    field.n_lons = static_cast<int>(nlon);
+    field.u.resize(nt_total * vol);
+    field.v.resize(nt_total * vol);
+    field.w.resize(nt_total * vol);
+    // field.t permanece vacío: la temperatura solo se necesita por bloque para omega -> w
+    if (want_sfc) {
+        field.u10.resize(nt_total * hp);
+        field.v10.resize(nt_total * hp);
+        field.sp.resize(nt_total * hp);
+        field.t2m.resize(nt_total * hp);
+        field.blh.resize(nt_total * hp);
+    }
+    std::vector<float> t_block(vol);
+
+    auto fail_truncate = [&](size_t keep_times) {
+        field.u.resize(keep_times * vol);
+        field.v.resize(keep_times * vol);
+        field.w.resize(keep_times * vol);
+        if (want_sfc) {
+            field.u10.resize(keep_times * hp); field.v10.resize(keep_times * hp); field.sp.resize(keep_times * hp);
+            field.t2m.resize(keep_times * hp); field.blh.resize(keep_times * hp);
+        }
+    };
+
+    size_t t_off = 0;
+    int loaded = 0;
+    for (size_t pi = 0; pi < probes.size(); ++pi) {
+        const Probe& pr = probes[pi];
+        bool ok = true;
+        int nc3 = 0;
+        if (nc_open(pr.f3d.c_str(), NC_NOWRITE, &nc3) != NC_NOERR) ok = false;
+        if (ok) {
+            int vid_u = -1, vid_v = -1, vid_w = -1, vid_t = -1;
+            nc_inq_varid(nc3, "u", &vid_u);
+            nc_inq_varid(nc3, "v", &vid_v);
+            nc_inq_varid(nc3, "w", &vid_w);
+            nc_inq_varid(nc3, "t", &vid_t);
+            ok = vid_u >= 0 && vid_v >= 0 && vid_w >= 0 && vid_t >= 0;
+            for (int vid : {vid_u, vid_v, vid_w, vid_t}) {
+                int nd = 0; nc_type xt = NC_NAT;
+                if (vid >= 0 && (nc_inq_varndims(nc3, vid, &nd) != NC_NOERR || nd != 4 ||
+                                 nc_inq_vartype(nc3, vid, &xt) != NC_NOERR || !is_supported_nc_numeric(xt))) ok = false;
+            }
+
+            // Niveles isobáricos: se leen del archivo; en modo estricto deben ser los 12 niveles 1000-700 hPa esperados
+            const std::vector<float> expected_levels = {1000, 975, 950, 925, 900, 875, 850, 825, 800, 775, 750, 700};
+            std::vector<float> levels;
+            int vid_pl = -1;
+            if (ok && nc_inq_varid(nc3, "pressure_level", &vid_pl) == NC_NOERR) {
+                std::vector<double> pl(nlev, 0.0);
+                if (nc_get_var_double(nc3, vid_pl, pl.data()) == NC_NOERR) {
+                    for (double v : pl) levels.push_back(static_cast<float>(v));
+                }
+            }
+            if (levels.size() != nlev) levels = (nlev == expected_levels.size()) ? expected_levels : std::vector<float>{};
+            if (strict_ || levels.empty()) {
+                if (levels.size() != expected_levels.size()) ok = false;
+                else for (size_t k = 0; k < nlev; ++k) if (std::abs(levels[k] - expected_levels[k]) > 1e-3f) ok = false;
+            }
+            if (!ok) {
+                std::cerr << "[NetCDF] ERROR" << (strict_ ? " (modo estricto)" : "") << ": " << pr.f3d
+                          << " no contiene u,v,w,t numéricas [tiempo,nivel,lat,lon] sobre los 12 niveles 1000-700 hPa esperados.\n";
+            }
+            if (ok && pi == 0) {
+                field.pressure_levels_hpa = levels;
+                field.lats.assign(nlat, 0.0f);
+                field.lons.assign(nlon, 0.0f);
+                int vid_lat = -1, vid_lon = -1;
+                if (nc_inq_varid(nc3, "latitude", &vid_lat) == NC_NOERR) nc_get_var_float(nc3, vid_lat, field.lats.data());
+                if (nc_inq_varid(nc3, "longitude", &vid_lon) == NC_NOERR) nc_get_var_float(nc3, vid_lon, field.lons.data());
+            }
+            // Los archivos CDS (zlib) usan chunks de ~248 h x 4 niveles x 27 x 34 (~3.6 MB): con la caché HDF5 por defecto
+            // (1 MB) cada lectura horaria re-descomprimiría el chunk completo (x248). Se amplía la caché por variable para
+            // que los 27 chunks espaciales de un instante queden residentes y cada chunk se descomprima UNA sola vez.
+            if (ok) {
+                constexpr size_t kChunkCacheBytes = 192u * 1024u * 1024u;
+                for (int vid : {vid_u, vid_v, vid_w, vid_t}) nc_set_var_chunk_cache(nc3, vid, kChunkCacheBytes, 521, 1.0f);
+            }
+            for (size_t ti = 0; ok && ti < pr.nt; ++ti) {
+                const size_t start[4] = {ti, 0, 0, 0};
+                const size_t count[4] = {1, nlev, nlat, nlon};
+                const size_t base = (t_off + ti) * vol;
+                ok = read_nc_var_cf(nc3, vid_u, vol, field.u.data() + base, start, count) &&
+                     read_nc_var_cf(nc3, vid_v, vol, field.v.data() + base, start, count) &&
+                     read_nc_var_cf(nc3, vid_w, vol, field.w.data() + base, start, count) &&
+                     read_nc_var_cf(nc3, vid_t, vol, t_block.data(), start, count);
+                if (!ok) break;
+                // Conversión hidrostática al vuelo: omega (Pa/s) -> w geométrica (m/s) = -omega R_d T / (p g)
+                float* wb = field.w.data() + base;
+                #pragma omp parallel for schedule(static)
+                for (std::ptrdiff_t l = 0; l < static_cast<std::ptrdiff_t>(nlev); ++l) {
+                    const float p_pa = field.pressure_levels_hpa[static_cast<size_t>(l)] * 100.0f;
+                    const size_t lb = static_cast<size_t>(l) * hp;
+                    for (size_t c = 0; c < hp; ++c) wb[lb + c] = omega_to_w(wb[lb + c], p_pa, t_block[lb + c]);
+                }
+            }
+            nc_close(nc3);
+            if (ok) files_read_.push_back(pr.f3d);
+        }
+
+        if (ok && want_sfc) {
+            int ncs = 0;
+            ok = nc_open(pr.fsfc.c_str(), NC_NOWRITE, &ncs) == NC_NOERR;
+            if (ok) {
+                const size_t start[3] = {0, 0, 0};
+                const size_t count[3] = {pr.nt, nlat, nlon};
+                const size_t n = pr.nt * hp, off = t_off * hp;
+                struct SfcVar { const char* name; std::vector<float>* dst; };
+                const SfcVar vars[] = {{"u10", &field.u10}, {"v10", &field.v10}, {"sp", &field.sp},
+                                       {"t2m", &field.t2m}, {"blh", &field.blh}};
+                for (const auto& sv : vars) {
+                    int vid = -1, nd = 0;
+                    ok = ok && nc_inq_varid(ncs, sv.name, &vid) == NC_NOERR &&
+                         nc_inq_varndims(ncs, vid, &nd) == NC_NOERR && nd == 3 &&
+                         read_nc_var_cf(ncs, vid, n, sv.dst->data() + off, start, count);
+                }
+                if (ok) {
+                    float* t2 = field.t2m.data() + off;   // Kelvin -> Celsius
+                    for (size_t i = 0; i < n; ++i) t2[i] -= 273.15f;
+                }
+                nc_close(ncs);
+                if (ok) files_read_.push_back(pr.fsfc);
+                else std::cerr << "[NetCDF] ERROR: " << pr.fsfc << " no contiene sp,t2m,u10,v10,blh numéricas [tiempo,lat,lon].\n";
+            }
+        }
+
+        if (!ok) {
+            if (pi == 0 || !resilient) return false;
+            std::cout << "[ERA5] AVISO: mes " << pr.month << " de " << year
+                      << " ilegible/incompleto; se conservan solo los meses previos.\n";
+            fail_truncate(t_off);
+            break;
+        }
+        t_off += pr.nt;
+        ++loaded;
+    }
+    field.n_times = static_cast<int>(t_off);
+    if (months_loaded) *months_loaded = loaded;
+    return t_off > 0;
+#else
+    (void)year; (void)months; (void)require_sfc; (void)resilient; (void)field;
+    return false;
+#endif
+}
+
 bool Era5NetCdfReader::load_month(int year, int month, AtmosphericField3D& field) {
     if (!year_allowed(year)) return false;
-#if defined(JORO_HAS_NETCDF)
-    std::string filename_3d = data_dir_ + "/era5_uvwt_" + std::to_string(year) +
-                              "_" + (month < 10 ? "0" : "") + std::to_string(month) + ".nc";
-    int ncid_3d = 0;
-    int status = nc_open(filename_3d.c_str(), NC_NOWRITE, &ncid_3d);
-    if (status != NC_NOERR && !strict_) {
-        // Intento con sufijo de día (_01.nc)
-        filename_3d = data_dir_ + "/era5_uvwt_" + std::to_string(year) +
-                      "_" + (month < 10 ? "0" : "") + std::to_string(month) + "_01.nc";
-        status = nc_open(filename_3d.c_str(), NC_NOWRITE, &ncid_3d);
-    }
-    if (status == NC_NOERR) files_read_.push_back(filename_3d);
-    if (status != NC_NOERR && strict_) {
-        std::cerr << "[NetCDF] ERROR (modo estricto): no se pudo abrir " << filename_3d << " ("
-                  << nc_strerror(status) << ").\n";
-        return false;
-    }
-    if (status == NC_NOERR) {
-        int dimid_time = -1, dimid_level = -1, dimid_lat = -1, dimid_lon = -1;
-        size_t n_times = 0, n_levels = 0, n_lats = 0, n_lons = 0;
-
-        nc_inq_dimid(ncid_3d, "valid_time", &dimid_time);
-        nc_inq_dimlen(ncid_3d, dimid_time, &n_times);
-        nc_inq_dimid(ncid_3d, "pressure_level", &dimid_level);
-        nc_inq_dimlen(ncid_3d, dimid_level, &n_levels);
-        nc_inq_dimid(ncid_3d, "latitude", &dimid_lat);
-        nc_inq_dimlen(ncid_3d, dimid_lat, &n_lats);
-        nc_inq_dimid(ncid_3d, "longitude", &dimid_lon);
-        nc_inq_dimlen(ncid_3d, dimid_lon, &n_lons);
-
-        if (n_times > 0 && n_levels > 0 && n_lats > 0 && n_lons > 0) {
-            field.n_times = static_cast<int>(n_times);
-            field.n_levels = static_cast<int>(n_levels);
-            field.n_lats = static_cast<int>(n_lats);
-            field.n_lons = static_cast<int>(n_lons);
-            field.pressure_levels_hpa = {1000, 975, 950, 925, 900, 875, 850, 825, 800, 775, 750, 700};
-
-            // Coordenadas reales de la malla (el muestreador 3D las usa para indexar)
-            field.lats.assign(n_lats, 0.0f);
-            field.lons.assign(n_lons, 0.0f);
-            int varid_lat = -1, varid_lon = -1;
-            if (nc_inq_varid(ncid_3d, "latitude", &varid_lat) == NC_NOERR) nc_get_var_float(ncid_3d, varid_lat, field.lats.data());
-            if (nc_inq_varid(ncid_3d, "longitude", &varid_lon) == NC_NOERR) nc_get_var_float(ncid_3d, varid_lon, field.lons.data());
-
-            size_t total_elements = n_times * n_levels * n_lats * n_lons;
-            field.u.resize(total_elements);
-            field.v.resize(total_elements);
-            field.w.resize(total_elements);
-            field.t.resize(total_elements);
-
-            int varid_u = -1, varid_v = -1, varid_w = -1, varid_t = -1;
-            nc_inq_varid(ncid_3d, "u", &varid_u);
-            nc_inq_varid(ncid_3d, "v", &varid_v);
-            nc_inq_varid(ncid_3d, "w", &varid_w);
-            nc_inq_varid(ncid_3d, "t", &varid_t);
-
-            if (strict_) {
-                // Validación: variables presentes, almacenadas en float32 (sin scale_factor) y niveles en el orden esperado
-                bool ok = varid_u >= 0 && varid_v >= 0 && varid_w >= 0 && varid_t >= 0;
-                for (int vid : {varid_u, varid_v, varid_w, varid_t}) {
-                    nc_type xt = NC_NAT;
-                    if (vid >= 0 && (nc_inq_vartype(ncid_3d, vid, &xt) != NC_NOERR || xt != NC_FLOAT)) ok = false;
-                }
-                int varid_pl = -1;
-                if (nc_inq_varid(ncid_3d, "pressure_level", &varid_pl) == NC_NOERR && n_levels == field.pressure_levels_hpa.size()) {
-                    std::vector<double> pl(n_levels, 0.0);
-                    nc_get_var_double(ncid_3d, varid_pl, pl.data());
-                    for (size_t k = 0; k < n_levels; ++k) {
-                        if (std::abs(pl[k] - static_cast<double>(field.pressure_levels_hpa[k])) > 1e-3) ok = false;
-                    }
-                } else {
-                    ok = false;
-                }
-                if (!ok) {
-                    std::cerr << "[NetCDF] ERROR (modo estricto): " << filename_3d
-                              << " no contiene u,v,w,t en float32 sobre los 12 niveles 1000-700 hPa esperados.\n";
-                    nc_close(ncid_3d);
-                    return false;
-                }
-            }
-
-            if (varid_u >= 0) nc_get_var_float(ncid_3d, varid_u, field.u.data());
-            if (varid_v >= 0) nc_get_var_float(ncid_3d, varid_v, field.v.data());
-            if (varid_w >= 0) nc_get_var_float(ncid_3d, varid_w, field.w.data());
-            if (varid_t >= 0) nc_get_var_float(ncid_3d, varid_t, field.t.data());
-
-            // Conversión hidrostática explícita: omega (Pa/s) -> velocidad geométrica vertical w (m/s)
-            // w = - (omega * R_d * T) / (p * g)
-            for (int t_idx = 0; t_idx < field.n_times; ++t_idx) {
-                for (int l_idx = 0; l_idx < field.n_levels; ++l_idx) {
-                    float p_pa = field.pressure_levels_hpa[l_idx] * 100.0f;
-                    for (int lat_idx = 0; lat_idx < field.n_lats; ++lat_idx) {
-                        for (int lon_idx = 0; lon_idx < field.n_lons; ++lon_idx) {
-                            size_t idx = ((static_cast<size_t>(t_idx) * field.n_levels + l_idx) * field.n_lats + lat_idx) * field.n_lons + lon_idx;
-                            field.w[idx] = omega_to_w(field.w[idx], p_pa, field.t[idx]);
-                        }
-                    }
-                }
-            }
-
-            nc_close(ncid_3d);
-
-            // Leer variables superficiales si existen
-            std::string filename_sfc = data_dir_ + "/era5_sfc_" + std::to_string(year) +
-                                       "_" + (month < 10 ? "0" : "") + std::to_string(month) + ".nc";
-            int ncid_sfc = 0;
-            const bool sfc_open = nc_open(filename_sfc.c_str(), NC_NOWRITE, &ncid_sfc) == NC_NOERR;
-            if (!sfc_open && strict_) {
-                std::cerr << "[NetCDF] ERROR (modo estricto): falta el archivo superficial " << filename_sfc << ".\n";
-                return false;
-            }
-            if (sfc_open) {
-                files_read_.push_back(filename_sfc);
-                size_t sfc_elements = n_times * n_lats * n_lons;
-                field.u10.resize(sfc_elements);
-                field.v10.resize(sfc_elements);
-                field.sp.resize(sfc_elements);
-                field.t2m.resize(sfc_elements);
-                field.blh.resize(sfc_elements);
-
-                int varid_u10 = -1, varid_v10 = -1, varid_sp = -1, varid_t2m = -1, varid_blh = -1;
-                nc_inq_varid(ncid_sfc, "u10", &varid_u10);
-                nc_inq_varid(ncid_sfc, "v10", &varid_v10);
-                nc_inq_varid(ncid_sfc, "sp", &varid_sp);
-                nc_inq_varid(ncid_sfc, "t2m", &varid_t2m);
-                nc_inq_varid(ncid_sfc, "blh", &varid_blh);
-                if (strict_) {
-                    bool ok = varid_u10 >= 0 && varid_v10 >= 0 && varid_sp >= 0 && varid_t2m >= 0 && varid_blh >= 0;
-                    for (int vid : {varid_u10, varid_v10, varid_sp, varid_t2m, varid_blh}) {
-                        nc_type xt = NC_NAT;
-                        if (vid >= 0 && (nc_inq_vartype(ncid_sfc, vid, &xt) != NC_NOERR || xt != NC_FLOAT)) ok = false;
-                    }
-                    if (!ok) {
-                        std::cerr << "[NetCDF] ERROR (modo estricto): " << filename_sfc
-                                  << " no contiene sp,t2m,u10,v10,blh en float32.\n";
-                        nc_close(ncid_sfc);
-                        return false;
-                    }
-                }
-
-                if (varid_u10 >= 0) nc_get_var_float(ncid_sfc, varid_u10, field.u10.data());
-                if (varid_v10 >= 0) nc_get_var_float(ncid_sfc, varid_v10, field.v10.data());
-                if (varid_sp >= 0) nc_get_var_float(ncid_sfc, varid_sp, field.sp.data());
-                if (varid_t2m >= 0) {
-                    nc_get_var_float(ncid_sfc, varid_t2m, field.t2m.data());
-                    // Conversión Kelvin -> Celsius [°C]
-                    for (size_t i = 0; i < sfc_elements; ++i) {
-                        field.t2m[i] -= 273.15f;
-                    }
-                }
-                if (varid_blh >= 0) nc_get_var_float(ncid_sfc, varid_blh, field.blh.data());
-
-                nc_close(ncid_sfc);
-            }
-
-            return true;
-        }
-        nc_close(ncid_3d);
-    } else {
-        std::cerr << "[NetCDF] Advertencia: No se pudo abrir " << filename_3d
-                  << " (" << nc_strerror(status) << "). Usando inicialización sintética de respaldo.\n";
-    }
-#endif
+    if (read_months(year, {month}, /*require_sfc=*/strict_, /*resilient=*/false, field, nullptr)) return true;
 
     if (strict_) {
         std::cerr << "[NetCDF] ERROR (modo estricto): carga ERA5 " << year << "-" << month
@@ -210,6 +330,7 @@ bool Era5NetCdfReader::load_month(int year, int month, AtmosphericField3D& field
     }
 
     // Si NetCDF no está disponible en tiempo de compilación o falló el archivo, usar malla meteorológica base
+    field = AtmosphericField3D{};
     field.n_times = 744; // 31 días * 24 horas
     field.n_levels = 12;
     field.n_lats = 81;
@@ -220,7 +341,6 @@ bool Era5NetCdfReader::load_month(int year, int month, AtmosphericField3D& field
     field.u.assign(total_elements, 5.0f);     // 5 m/s hacia el este
     field.v.assign(total_elements, 2.0f);     // 2 m/s hacia el norte
     field.w.assign(total_elements, 0.05f);    // 0.05 m/s ascenso débil
-    field.t.assign(total_elements, 295.15f);  // 22 °C
     
     size_t sfc_elements = static_cast<size_t>(field.n_times) * field.n_lats * field.n_lons;
     field.u10.assign(sfc_elements, 3.5f);
@@ -231,8 +351,31 @@ bool Era5NetCdfReader::load_month(int year, int month, AtmosphericField3D& field
     return true;
 }
 
+bool Era5NetCdfReader::load_season(int year, const std::vector<int>& months, AtmosphericField3D& out) {
+    if (months.empty()) return false;
+    if (!year_allowed(year)) return false;
+
+    int loaded = 0;
+    if (read_months(year, months, /*require_sfc=*/true, /*resilient=*/true, out, &loaded)) {
+        std::cout << "[ERA5] Temporada " << year << ": " << loaded << " de " << months.size()
+                  << " mes(es) cargado(s) = " << out.n_times << " h";
+        if (loaded < static_cast<int>(months.size())) {
+            std::cout << "  (AVISO: temporada incompleta, faltan meses por descargar; horas esperadas "
+                      << "168/744/1464/2208 según meses cerrados)";
+        }
+        std::cout << "\n";
+        return true;
+    }
+    if (strict_) {
+        std::cerr << "[NetCDF] ERROR (modo estricto): ni siquiera el primer mes (" << months.front() << ") de "
+                  << year << " está disponible.\n";
+        return false;
+    }
+    return load_month(year, months.front(), out);
+}
+
 void Era5NetCdfReader::interpolate_wind_3d(
-    const AtmosphericField3D& field,
+    const AtmosphericField3D& /*field*/,
     float /*lon*/, float /*lat*/, float /*altitude_m*/, float /*time_h*/,
     float& u_out, float& v_out, float& w_out) const 
 {

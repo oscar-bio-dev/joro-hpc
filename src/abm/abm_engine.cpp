@@ -21,9 +21,10 @@ constexpr size_t kParallelCohortThreshold = 128;
 /// (gather AVX-512). beta_s ∈ {1,2,3} se evalúa con multiplicación directa (sin std::pow).
 inline float winter_damage_sum(
     const io::DailyThermalGrid& th, const GridCell& cell,
-    int d0, int d1, float t_c, float alpha, int beta) noexcept
+    int d0, int d1, float t_c, float alpha, int beta, float delta_dosel, float delta_imp) noexcept
 {
-    const float dosel_buffer = 0.35f * cell.z_dosel; // amortiguación microclimática del dosel
+    // Amortiguación microclimática (Ec. 16): dosel arbóreo + isla de calor/estructuras urbanas
+    const float dosel_buffer = delta_dosel * cell.z_dosel + delta_imp * cell.z_imp;
     float acc = 0.0f;
     if (th.has_data()) {
         const size_t stride = th.day_stride();
@@ -74,6 +75,29 @@ inline float development_sum(
     return acc;
 }
 
+/// Día del año (0-based) en que el juvenil de la celda alcanza `dd_threshold` de desarrollo tras la eclosión (día 91);
+/// 200 si no lo alcanza. Determina el inicio escalonado de la ventana de despegue de cada celda.
+inline int emergence_day(const io::DailyThermalGrid& th, const GridCell& cell,
+                         const DemographicParameters& p, float ln_q10, float dd_threshold) noexcept
+{
+    float acc = 0.0f;
+    const float t_lo = p.t_min_dev, t_hi = p.t_max_dev, t_ref = p.t_ref, r_ref = p.r_ref;
+    const size_t stride = th.has_data() ? th.day_stride() : 0;
+    const float* tmean = th.has_data() ? th.t2m_mean.data() + th.locate(cell.centroid_lat, cell.centroid_lon) : nullptr;
+    for (int d = 91; d < 200; ++d) {
+        float t;
+        if (tmean) {
+            t = tmean[static_cast<size_t>(d) * stride];
+        } else {
+            float t_min = 0.0f;
+            th.get_temp(d, cell.centroid_lat, cell.centroid_lon, t_min, t);
+        }
+        if (t >= t_lo && t <= t_hi) acc += r_ref * std::exp(((t - t_ref) * 0.1f) * ln_q10);
+        if (acc >= dd_threshold) return d;
+    }
+    return 200;
+}
+
 } // namespace
 
 CellIndexTable CellIndexTable::build(const std::vector<GridCell>& cells) {
@@ -98,6 +122,16 @@ CarryingCapacityParams make_carrying_params(const DemographicParameters& p) {
 
 AbmEngine::AbmEngine(DemographicParameters params)
     : params_(params) {}
+
+std::vector<std::pair<int32_t, float>> AbmEngine::transportable_ootecas() const {
+    std::unordered_map<int32_t, float> per_cell;
+    for (size_t i = 0; i < cohorts_.size(); ++i) {
+        if (cohorts_.is_alive[i] && cohorts_.stage[i] == 0 && cohorts_.weight[i] > 0.0f) per_cell[cohorts_.cell_id[i]] += cohorts_.weight[i];
+    }
+    std::vector<std::pair<int32_t, float>> out(per_cell.begin(), per_cell.end());
+    std::sort(out.begin(), out.end());
+    return out;
+}
 
 void AbmEngine::initialize_seed(const std::vector<GridCell>& cells, float rho0) {
     cohorts_.clear();
@@ -135,10 +169,12 @@ void AbmEngine::deposit_arrivals(const std::unordered_map<int32_t, uint32_t>& ar
 DemographyYearSummary AbmEngine::step_spring_phenology(
     const std::vector<GridCell>& cells,
     const io::DailyThermalGrid& thermal,
-    int /*year*/) 
+    int year) 
 {
     DemographyYearSummary summary;
-    std::mt19937 rng(42819);
+    // Semilla dinámica (M8): derivada del año (índice desde 2014) y de la réplica Monte Carlo
+    const uint32_t year_idx = static_cast<uint32_t>(std::max(0, year - 2014));
+    std::mt19937 rng(42819u ^ (year_idx * 0x85EBCA6Bu) ^ mc_seed_);
 
     CellIndexTable local_index;
     const CellIndexTable* index = cell_index_ext_;
@@ -150,6 +186,7 @@ DemographyYearSummary AbmEngine::step_spring_phenology(
     const size_t n_cohorts = cohorts_.size();
     const float ln_q10 = std::log(params_.q10);
     const bool par = n_cohorts >= kParallelCohortThreshold;
+    (void)par;
 
     // ─────────────────────────────────────────────────────────────────────────
     // PILAR 3: Mortalidad Invernal por Daño Acumulado D_{j,t} (Días 1 a 90: Invierno)
@@ -162,16 +199,23 @@ DemographyYearSummary AbmEngine::step_spring_phenology(
 
     #pragma omp parallel for schedule(static) if(par) reduction(+:initial_egg_weight, survived_egg_weight)
     for (size_t c_idx = 0; c_idx < n_cohorts; ++c_idx) {
-        if (!cohorts_.is_alive[c_idx] || cohorts_.stage[c_idx] != 0) continue;
-        initial_egg_weight += cohorts_.weight[c_idx];
+        if (cohorts_.stage[c_idx] != 0) continue;
+        const bool was_alive = cohorts_.is_alive[c_idx] != 0;
+        if (was_alive) initial_egg_weight += cohorts_.weight[c_idx];
 
         const int32_t pos = index->find(cohorts_.cell_id[c_idx]);
         if (pos < 0) continue;
         const auto& cell = cells[static_cast<size_t>(pos)];
 
-        // Bucle diario sobre los 90 días de invierno (enero a marzo)
-        const float d_sum = winter_damage_sum(thermal, cell, 0, 90,
-                                              params_.t_c, params_.alpha_damage, params_.beta_damage);
+        // Ventana invernal completa (M11): noviembre-diciembre (otoño previo) + enero-marzo (aquí). Las ootecas que ya
+        // murieron en diciembre SIGUEN acumulando el daño de enero-marzo para que \bar D_{i,t} (que alimenta phi_{i,t})
+        // refleje el estrés total justo en las celdas gélidas donde la cohorte se extinguió.
+        const float d_sum = winter_damage_sum(thermal, cell, 0, 90, params_.t_c, params_.alpha_damage,
+                                              params_.beta_damage, params_.delta_dosel, params_.delta_imp);
+        if (!was_alive) {
+            cohorts_.cold_damage_D[c_idx] += d_sum;
+            continue;
+        }
         if (d_sum > 0.0f) {
             cohorts_.cold_damage_D[c_idx] += d_sum;
             cohorts_.weight[c_idx] *= std::exp(-d_sum);
@@ -211,10 +255,22 @@ DemographyYearSummary AbmEngine::step_spring_phenology(
     // Fracción q_balloon emprende vuelo via LPDM. Se mantiene SERIAL: el generador binomial
     // comparte un único RNG determinista (reproducibilidad independiente del nº de hilos).
     // ─────────────────────────────────────────────────────────────────────────
+    std::unordered_map<int32_t, std::pair<double, double>> emergence_acc; // cell -> (Σ w·día, Σ w)
     for (size_t c_idx = 0; c_idx < n_cohorts; ++c_idx) {
         if (!cohorts_.is_alive[c_idx] || cohorts_.stage[c_idx] != 1) continue;
         float w = cohorts_.weight[c_idx];
         if (w <= 0.0f) continue;
+
+        // Emergencia escalonada: día en que la celda acumula suficiente desarrollo para despegar
+        {
+            const int32_t pos_e = index->find(cohorts_.cell_id[c_idx]);
+            if (pos_e >= 0) {
+                const int e_day = emergence_day(thermal, cells[static_cast<size_t>(pos_e)], params_, ln_q10, params_.dd_emergence);
+                auto& acc = emergence_acc[cohorts_.cell_id[c_idx]];
+                acc.first += static_cast<double>(w) * e_day;
+                acc.second += w;
+            }
+        }
 
         uint32_t total_int = static_cast<uint32_t>(std::round(w));
         uint32_t n_ballooners = 0;
@@ -234,6 +290,12 @@ DemographyYearSummary AbmEngine::step_spring_phenology(
             cohorts_.is_alive[c_idx] = 0;
             cohorts_.weight[c_idx] = 0.0f;
         }
+    }
+
+    // Horas de inicio de la ventana de despegue respecto al 1 de mayo 00 UTC (día 120, 0-based); 0 si ya emergieron
+    for (const auto& [cid, acc] : emergence_acc) {
+        const double mean_day = acc.second > 0.0 ? acc.first / acc.second : 120.0;
+        summary.emergence_hours_per_cell[cid] = static_cast<float>(std::max(0.0, (mean_day - 120.0) * 24.0));
     }
 
     return summary;
@@ -258,6 +320,7 @@ DemographyYearSummary AbmEngine::step_summer_autumn_phenology(
     const size_t n_cohorts = cohorts_.size();
     const float ln_q10 = std::log(params_.q10);
     const bool par = n_cohorts >= kParallelCohortThreshold;
+    (void)par;
 
     // ─────────────────────────────────────────────────────────────────────────
     // PILAR 1: Reloj Fenológico y Desarrollo Q10 (Días 121 a 240: Mayo a Agosto)
@@ -274,8 +337,14 @@ DemographyYearSummary AbmEngine::step_summer_autumn_phenology(
 
         cohorts_.degree_days[c_idx] += development_sum(thermal, cell, 120, 240, params_, ln_q10);
 
-        // Transición a adulto reproductivo cuando acumula desarrollo completo (age >= 1.0)
-        if (cohorts_.degree_days[c_idx] >= 1.0f) {
+        // Maduración reproductiva CONTINUA (M10): fracción S_juv = logit^-1(kappa_dd (DD - 1)) que alcanza la madurez antes
+        // de la helada (semelparidad: el resto muere). Sustituye el corte binario DD >= 1 todo-o-nada.
+        const float s_juv = 1.0f / (1.0f + std::exp(-params_.kappa_dd * (cohorts_.degree_days[c_idx] - 1.0f)));
+        cohorts_.weight[c_idx] *= s_juv;
+        if (cohorts_.weight[c_idx] < 0.005f) {
+            cohorts_.is_alive[c_idx] = 0;
+            cohorts_.weight[c_idx] = 0.0f;
+        } else {
             cohorts_.stage[c_idx] = 3; // Adulto
         }
     }
@@ -312,11 +381,8 @@ DemographyYearSummary AbmEngine::step_summer_autumn_phenology(
         n_occupied++;
 
         // Temperatura estival/otoñal promedio en ventana reproductiva
-        float t_min_fall = 0.0f, t_mean_fall = 0.0f;
-        thermal.get_temp(250, cell.centroid_lat, cell.centroid_lon, t_min_fall, t_mean_fall);
-
-        float q10_f = std::clamp(std::pow(params_.q10, (t_mean_fall - params_.t_ref) / 10.0f), 0.2f, 3.0f);
-        float f_eff = params_.fecundity_F * q10_f;
+        // Semelparidad de saco único (M10): F = 450 huevos/saco FIJO; la temperatura actúa sobre la maduración (S_juv)
+        const float f_eff = params_.fecundity_F;
 
         // Ecuación canónica de regulación denso-dependiente asintótica de Beverton-Holt (Sección 8):
         // mu_B = (R0 * N) / (1 + ((R0 - 1) / K_i) * N)
@@ -353,6 +419,7 @@ DemographyYearSummary AbmEngine::step_summer_autumn_phenology(
     // ─────────────────────────────────────────────────────────────────────────
     const size_t n_new_cohorts = cohorts_.size();
     const bool par_new = n_new_cohorts >= kParallelCohortThreshold;
+    (void)par_new;
 
     #pragma omp parallel for schedule(static) if(par_new)
     for (size_t c_idx = 0; c_idx < n_new_cohorts; ++c_idx) {
@@ -360,8 +427,8 @@ DemographyYearSummary AbmEngine::step_summer_autumn_phenology(
         if (pos < 0) continue;
         const auto& cell = cells[static_cast<size_t>(pos)];
 
-        const float d_sum = winter_damage_sum(thermal, cell, 280, 365,
-                                              params_.t_c, params_.alpha_damage, params_.beta_damage);
+        const float d_sum = winter_damage_sum(thermal, cell, 304, 365, params_.t_c, params_.alpha_damage,
+                                              params_.beta_damage, params_.delta_dosel, params_.delta_imp);
         if (d_sum > 0.0f) {
             cohorts_.cold_damage_D[c_idx] += d_sum;
             cohorts_.weight[c_idx] *= std::exp(-d_sum);
@@ -384,13 +451,8 @@ DemographyYearSummary AbmEngine::step_annual_cycle_daily(
     // 1. Fase primaveral (invernada previa, emergencia y baloneo)
     auto spring_summary = step_spring_phenology(cells, thermal, year);
 
-    // 2. Baloneo local: propágulos que no dispersan a larga distancia aterrizan localmente
-    std::unordered_map<int32_t, uint32_t> local_dispersal;
-    for (const auto& [cell_id, count] : spring_summary.ballooners_per_cell) {
-        uint32_t retained = static_cast<uint32_t>(count * (1.0f - params_.q_balloon));
-        if (retained > 0) local_dispersal[cell_id] = retained;
-    }
-    deposit_arrivals(local_dispersal);
+    // 2. La retención local (1 - q_balloon) YA permanece en la cohorte tras step_spring_phenology (solo se resta
+    //    la fracción que despega): no se vuelve a inyectar (M9, fin de la doble retención 1 - q_balloon^2).
 
     // 3. Fase estival/otoñal (desarrollo Q10, maduración, reproducción Ki)
     auto fall_summary = step_summer_autumn_phenology(cells, thermal, year);
@@ -468,9 +530,8 @@ DemographyYearSummary AbmEngine::step_annual_cycle(
             t_summer = mean_summer_temp_c[it->second];
         }
 
-        float q10_factor = std::pow(params_.q10, (t_summer - 20.0f) / 10.0f);
-        q10_factor = std::clamp(q10_factor, 0.2f, 3.5f);
-        float fecundity_eff = params_.fecundity_F * q10_factor;
+        (void)t_summer;   // F = 450 huevos/saco fijo (semelparidad de saco único, M10)
+        const float fecundity_eff = params_.fecundity_F;
 
         float k_i = compute_carrying_capacity(cell, cc);
         sum_sat += (n_adults / k_i);

@@ -12,10 +12,12 @@ out-of-sample validation matter more than speed of merging.
 2. **Frozen artifacts do not change silently.** Changing `calibration_set_2014_2019.csv`, `evaluation_set_2020_2024.csv` or the
    `Θ_comp` ensembles requires a new SHA-256 in the report manifest and an explanation in the pull request.
 3. **`ctest` must pass 4/4** before every pull request:
+
    ```bash
    cmake -S . -B build && cmake --build build -j"$(nproc)"
    ctest --test-dir build --output-on-failure
    ```
+
 4. **Zero credentials in code.** Passwords, tokens and API keys never appear in sources, configs, notebooks or logs. Read them from the
    environment (`JORO_DB_*`, see `.env.example`). Check with `git grep -i "password\s*=" -- ':!.env.example'` before pushing.
 5. **No hard-coded results.** Numbers in reports come from artifacts (`validation_metrics.json`, `calibration_summary_*.json`, ...)

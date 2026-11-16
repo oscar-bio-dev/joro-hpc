@@ -21,23 +21,21 @@ from sklearn.metrics import (
     brier_score_loss,
     log_loss,
 )
-from sklearn.linear_model import LinearRegression
+from sklearn.linear_model import LogisticRegression
 
 _DEFAULT_DATA = "data" if Path("data").exists() else "/mnt/hpc_scratch/joro-hpc"
 DATA_DIR = os.environ.get("JORO_DATA_DIR", _DEFAULT_DATA)
-PRED_CSV = f"{DATA_DIR}/outputs/predictions_2020_2024_ensemble.csv"
-OUT_JSON = f"{DATA_DIR}/outputs/validation_metrics.json"
+OUT_DIR = os.environ.get("JORO_EVAL_OUTPUT_DIR", f"{DATA_DIR}/outputs").rstrip("/")
+PRED_CSV = f"{OUT_DIR}/predictions_2020_2024_ensemble.csv"
+OUT_JSON = f"{OUT_DIR}/validation_metrics.json"
 
-SEED_JSON = f"{DATA_DIR}/outputs/seed_geometry.json"
-PREV_JSON = f"{DATA_DIR}/outputs/prevalence_scaling.json"
-
-# Referencia heredada de la calibración: distancias del frente (P50/P90/P95) y envolvente de ocupación.
-EPI_LAT = 34.13816
-EPI_LON = -83.75723
+SEED_JSON = f"{OUT_DIR}/seed_geometry.json"
+PREV_JSON = f"{OUT_DIR}/prevalence_scaling.json"
+HYP_JSON = f"{OUT_DIR}/hypothesis_diagnostics.json"
 
 
 def load_seed_geometry():
-    """Centroide y radio del polígono semilla (artefacto de `joro_evaluate`; referencia angular del frente)."""
+    """Centroide y radio del polígono semilla (artefacto de `joro_evaluate`; referencia geométrica unificada M15)."""
     if not os.path.exists(SEED_JSON):
         raise SystemExit(f"Falta {SEED_JSON}: ejecute joro_evaluate primero")
     with open(SEED_JSON) as fh:
@@ -48,17 +46,15 @@ SEED = load_seed_geometry()
 
 
 def dist_km(lat, lon):
-    dlat = (lat - EPI_LAT) * 111.0
-    dlon = (lon - EPI_LON) * 111.0 * np.cos(np.radians(EPI_LAT))
-    return np.sqrt(dlat**2 + dlon**2)
-
-
-def dist_seed_km(lat, lon):
     dlat = (lat - SEED["centroid_lat"]) * 111.0
     dlon = (
         (lon - SEED["centroid_lon"]) * 111.0 * np.cos(np.radians(SEED["centroid_lat"]))
     )
     return np.sqrt(dlat**2 + dlon**2)
+
+
+def dist_seed_km(lat, lon):
+    return dist_km(lat, lon)
 
 
 def azimuth_deg(lat, lon):
@@ -92,12 +88,13 @@ def angular_diff(a1, a2):
 
 
 def get_calibration_slope_intercept(p, y):
-    eps = 1e-6
+    """Calibración logística de Cox (1958): logit P(Y=1) = alpha + beta * logit(p_hat). Ideal: beta = 1, alpha = 0."""
+    eps = 1e-4
     p_c = np.clip(p, eps, 1.0 - eps)
     logit_p = np.log(p_c / (1.0 - p_c)).reshape(-1, 1)
-    lr = LinearRegression()
-    lr.fit(logit_p, y)
-    return float(lr.coef_[0]), float(lr.intercept_)
+    clf = LogisticRegression(C=1e6, solver="lbfgs", max_iter=500)
+    clf.fit(logit_p, y)
+    return float(clf.coef_[0][0]), float(clf.intercept_[0])
 
 
 def calc_balanced_brier(p, y, dists, radius=350.0):
@@ -123,10 +120,13 @@ def main():
     models = {
         "m1_map": "p_m1_map",
         "m1_median": "p_m1_median",
+        "m1_kmixto": "p_m1_kmixto",
         "m0_map": "p_m0_map",
         "iso_null": "p_iso_null",
         "sdm": "p_sdm",
     }
+    if "p_m1_kmixto" not in df.columns:
+        models.pop("m1_kmixto", None)
 
     results = {
         "global": {},
@@ -160,7 +160,8 @@ def main():
             "calib_intercept": intercept,
         }
         print(
-            f"[{m_key:10s}] Brier: {bg:.5f} (Bal: {bb:.5f}) | LogLoss: {ll:.4f} | AUC: {auc:.4f} | PR-AUC: {prauc:.4f} | Slope: {slope:.3f}"
+            f"[{m_key:10s}] Brier: {bg:.5f} (Bal: {bb:.5f}) | "
+            f"LogLoss: {ll:.4f} | AUC: {auc:.4f} | PR-AUC: {prauc:.4f} | Slope: {slope:.3f}"
         )
 
     print("\n--- 2. DESGLOSE ANUAL FUERA DE MUESTRA (2020-2024) ---")
@@ -187,7 +188,13 @@ def main():
 
         results["by_year"][yr] = yr_res
         print(
-            f"Año {yr} (N_pos={yr_res['presences']:3d}) | Brier M1: {yr_res['m1_map']['brier']:.5f}, Kern: {yr_res['iso_null']['brier']:.5f}, SDM: {yr_res['sdm']['brier']:.5f} | AUC M1: {yr_res['m1_map']['auc']:.4f}, Kern: {yr_res['iso_null']['auc']:.4f}, SDM: {yr_res['sdm']['auc']:.4f}"
+            f"Año {yr} (N_pos={yr_res['presences']:3d}) | "
+            f"Brier M1: {yr_res['m1_map']['brier']:.5f}, "
+            f"Kern: {yr_res['iso_null']['brier']:.5f}, "
+            f"SDM: {yr_res['sdm']['brier']:.5f} | "
+            f"AUC M1: {yr_res['m1_map']['auc']:.4f}, "
+            f"Kern: {yr_res['iso_null']['auc']:.4f}, "
+            f"SDM: {yr_res['sdm']['auc']:.4f}"
         )
 
     print("\n--- 3. CINEMÁTICA Y GEOMETRÍA DEL FRENTE DE INVASIÓN (H2) ---")
@@ -252,10 +259,14 @@ def main():
 
         kin[yr] = yr_kin
         print(
-            f"Año {yr} | Obs P95: {o_p95:.1f} km, M1 P95: {yr_kin['m1_map']['p95']:.1f} km, Iso P95: {yr_kin['iso_null']['p95']:.1f} km | Error Ang M1: {yr_kin['m1_map']['angular_error_deg']:.1f}°, Iso: {yr_kin['iso_null']['angular_error_deg']:.1f}°"
+            f"Año {yr} | Obs P95: {o_p95:.1f} km, "
+            f"M1 P95: {yr_kin['m1_map']['p95']:.1f} km, "
+            f"Iso P95: {yr_kin['iso_null']['p95']:.1f} km | "
+            f"Error Ang M1: {yr_kin['m1_map']['angular_error_deg']:.1f}°, "
+            f"Iso: {yr_kin['iso_null']['angular_error_deg']:.1f}°"
         )
 
-    sim_kin_path = "/mnt/hpc_scratch/joro-hpc/outputs/validation_sim_kinematics.json"
+    sim_kin_path = f"{OUT_DIR}/validation_sim_kinematics.json"
     if os.path.exists(sim_kin_path):
         with open(sim_kin_path) as kf:
             sim_kin = json.load(kf)
@@ -305,8 +316,10 @@ def main():
             first_errs[m_key].append(abs(t_pred - t_obs))
 
     results["first_arrival_mae"] = {k: float(np.mean(v)) for k, v in first_errs.items()}
+    mae = results["first_arrival_mae"]
     print(
-        f"Error MAE Primera Llegada: M1={results['first_arrival_mae']['m1_map']:.2f} años, Iso={results['first_arrival_mae']['iso_null']:.2f} años, SDM={results['first_arrival_mae']['sdm']:.2f} años"
+        f"Error MAE Primera Llegada: M1={mae['m1_map']:.2f} años, "
+        f"Iso={mae['iso_null']:.2f} años, SDM={mae['sdm']:.2f} años"
     )
 
     print("\n--- 4. PERSISTENCIA TÉRMICA Y TRANSFERENCIA POR ECORREGIONES (H1) ---")
@@ -333,7 +346,9 @@ def main():
     results["thermal_persistence"]["fpr_north_40"] = fpr_north
     results["thermal_persistence"]["tau_opt"] = tau_opt
     print(
-        f"Tasa Falsos Positivos Norte (>38°–40°N, tau*={0.001208}): M1={fpr_north['m1_map']*100:.2f}%, M0={fpr_north['m0_map']*100:.2f}%, Iso={fpr_north['iso_null']*100:.2f}%, SDM={fpr_north['sdm']*100:.2f}%"
+        f"Tasa Falsos Positivos Norte (>38°–40°N, tau*={0.001208}): "
+        f"M1={fpr_north['m1_map']*100:.2f}%, M0={fpr_north['m0_map']*100:.2f}%, "
+        f"Iso={fpr_north['iso_null']*100:.2f}%, SDM={fpr_north['sdm']*100:.2f}%"
     )
 
     # Persistencia interanual (>= 2 años consecutivos)
@@ -356,15 +371,18 @@ def main():
 
     if persist_records["observed"]:
         y_p = np.array(persist_records["observed"])
-        results["thermal_persistence"]["interannual_persistence_brier"] = {
+        ip_brier = {
             "m1": float(brier_score_loss(y_p, persist_records["m1"])),
             "m0": float(brier_score_loss(y_p, persist_records["m0"])),
             "iso": float(brier_score_loss(y_p, persist_records["iso"])),
             "sdm": float(brier_score_loss(y_p, persist_records["sdm"])),
             "n_evaluations": len(y_p),
         }
+        results["thermal_persistence"]["interannual_persistence_brier"] = ip_brier
         print(
-            f"Brier Persistencia Interanual (N={len(y_p)}): M1={results['thermal_persistence']['interannual_persistence_brier']['m1']:.4f}, M0={results['thermal_persistence']['interannual_persistence_brier']['m0']:.4f}, Iso={results['thermal_persistence']['interannual_persistence_brier']['iso']:.4f}, SDM={results['thermal_persistence']['interannual_persistence_brier']['sdm']:.4f}"
+            f"Brier Persistencia Interanual (N={len(y_p)}): "
+            f"M1={ip_brier['m1']:.4f}, M0={ip_brier['m0']:.4f}, "
+            f"Iso={ip_brier['iso']:.4f}, SDM={ip_brier['sdm']:.4f}"
         )
 
     # Desempeño por bloques ecorregionales (Bloque 5 visto vs Bloques no vistos)
@@ -390,7 +408,11 @@ def main():
     results["ecoregions"] = eco_res
     b5 = eco_res.get(5, {})
     print(
-        f"Bloque 5 (Visto en Calibración): N_pos={b5.get('presences',0)} | Brier M1={b5.get('m1_map',{}).get('brier',0):.5f}, SDM={b5.get('sdm',{}).get('brier',0):.5f} | AUC M1={b5.get('m1_map',{}).get('auc',0):.4f}, SDM={b5.get('sdm',{}).get('auc',0):.4f}"
+        f"Bloque 5 (Visto en Calibración): N_pos={b5.get('presences', 0)} | "
+        f"Brier M1={b5.get('m1_map', {}).get('brier', 0):.5f}, "
+        f"SDM={b5.get('sdm', {}).get('brier', 0):.5f} | "
+        f"AUC M1={b5.get('m1_map', {}).get('auc', 0):.4f}, "
+        f"SDM={b5.get('sdm', {}).get('auc', 0):.4f}"
     )
 
     # Bloque 5 (Visto)
@@ -462,7 +484,6 @@ def main():
         )
     p5 = df["p_m1_p5"].values
     p95 = df["p_m1_p95"].values
-    med = df["p_m1_median"].values
 
     try:
         with open(
@@ -492,6 +513,9 @@ def main():
         },
         "seed_geometry": SEED,
     }
+    if os.path.exists(HYP_JSON):
+        with open(HYP_JSON) as hfh:
+            results["hypothesis_diagnostics"] = json.load(hfh)
 
     with open(OUT_JSON, "w") as f:
         json.dump(results, f, indent=2)

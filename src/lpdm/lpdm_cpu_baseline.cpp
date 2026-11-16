@@ -1,6 +1,8 @@
 #include "lpdm/lpdm_engine.hpp"
 #include "lpdm/langevin_turbulence.hpp"
 #include "lpdm/settling_velocity.hpp"
+#include "lpdm/superparticle_policy.hpp"
+#include "lpdm/lpdm_trace.hpp"
 #include "common/spatial_grid_lookup.hpp"
 #include "lpdm/era5_view.hpp"
 #include <random>
@@ -37,7 +39,7 @@ public:
 
     bool add_atmosphere(const io::AtmosphericField3D& atmosphere) override {
         Era5Pack pack;
-        if (!pack.build(atmosphere)) return false;
+        if (!pack.build(atmosphere, time_stride_)) return false;
         eras_.push_back(std::move(pack));
         eras_.back().refresh_view();
         active_ = eras_.size() - 1;
@@ -53,6 +55,18 @@ public:
 
     [[nodiscard]] size_t atmosphere_count() const noexcept override { return eras_.size(); }
 
+    [[nodiscard]] size_t atmosphere_host_bytes() const noexcept override {
+        size_t b = 0;
+        for (const auto& e : eras_) b += e.bytes();
+        return b;
+    }
+
+    void set_emergence_offsets(const std::unordered_map<int32_t, float>& start_hours) override { emergence_ = start_hours; }
+    void set_era5_time_stride(int hours) override { time_stride_ = std::max(1, hours); }
+    void set_mc_seed(uint32_t mc_seed) override { mc_seed_ = mc_seed; }
+    void set_year_index(uint32_t year_idx) override { year_idx_override_ = year_idx; has_year_override_ = true; }
+    void set_max_super_particles(size_t budget) override { max_super_ = budget; }
+
     [[nodiscard]] bool is_atmosphere_resident() const noexcept override { return atmosphere_resident_; }
 
     void initialize_particles(
@@ -65,38 +79,50 @@ public:
             spatial_lookup_.build(cells_);
         }
 
-        constexpr uint32_t MAX_PARTICLES_PER_CELL = 25000;
-
+        // Política unificada de tope y reescalado de pesos (M7): idéntica a la del motor SYCL
+        std::vector<const GridCell*> emit_cells;
+        std::vector<uint32_t> totals;
         for (const auto& cell : cells) {
             auto it = propagules_per_cell.find(cell.cell_id);
             if (it != propagules_per_cell.end() && it->second > 0) {
-                uint32_t total_props = it->second;
-                uint32_t n_sim = std::min(total_props, MAX_PARTICLES_PER_CELL);
-                uint32_t base_weight = total_props / n_sim;
-                uint32_t remainder = total_props % n_sim;
+                emit_cells.push_back(&cell);
+                totals.push_back(it->second);
+            }
+        }
+        std::vector<uint32_t> n_sim_plan;
+        plan_super_particles(totals, max_super_, n_sim_plan);
 
-                // Generador para inyección convectiva inicial en despegue
-                std::mt19937 init_rng(84920 + cell.cell_id);
-                std::uniform_real_distribution<float> takeoff_z(30.0f, 250.0f);
-                std::uniform_real_distribution<float> takeoff_w(0.35f, 0.50f);
+        for (size_t k = 0; k < emit_cells.size(); ++k) {
+            const GridCell& cell = *emit_cells[k];
+            const uint32_t total_props = totals[k];
+            const uint32_t n_sim = n_sim_plan[k];
+            const uint32_t base_weight = total_props / n_sim;
+            const uint32_t remainder = total_props % n_sim;
 
-                for (uint32_t i = 0; i < n_sim; ++i) {
-                    Particle3D p;
-                    p.x = cell.centroid_lon;
-                    p.y = cell.centroid_lat;
-                    p.origin_x = cell.centroid_lon;
-                    p.origin_y = cell.centroid_lat;
-                    p.z = takeoff_z(init_rng); // Altura de entrada al régimen de baloneo libre
-                    p.w_prime = takeoff_w(init_rng); // Impulso convectivo ascendente inicial (w'_0 > vs ~0.295 m/s)
-                    p.mass_mg = 0.6f;          // Juvenil ninfal típico de mayo
-                    p.silk_length_m = 1.2f;    // Línea de baloneo
-                    p.posture_chi = 0.85f;
-                    // Partición entera exacta: la suma sobre las n_sim partículas es estrictamente total_props
-                    p.weight = static_cast<float>(base_weight + (i < remainder ? 1 : 0));
-                    p.origin_cell = cell.cell_id;
-                    p.is_active = true;
-                    particles_.push_back(p);
-                }
+            // Generador para inyección convectiva inicial en despegue y rasgos alométricos individuales (M6)
+            std::mt19937 init_rng((84920u + static_cast<uint32_t>(cell.cell_id)) ^ mc_seed_);
+            std::uniform_real_distribution<float> takeoff_z(30.0f, 250.0f);
+            std::uniform_real_distribution<float> takeoff_w(0.35f, 0.50f);
+            std::uniform_real_distribution<float> mass_dist(0.4f, 0.9f);
+            std::uniform_real_distribution<float> silk_dist(0.8f, 1.6f);
+
+            for (uint32_t i = 0; i < n_sim; ++i) {
+                Particle3D p;
+                p.x = cell.centroid_lon;
+                p.y = cell.centroid_lat;
+                p.origin_x = cell.centroid_lon;
+                p.origin_y = cell.centroid_lat;
+                p.z = takeoff_z(init_rng); // Altura de entrada al régimen de baloneo libre
+                p.w_prime = takeoff_w(init_rng); // Impulso convectivo ascendente inicial (w'_0 > vs ~0.295 m/s)
+                p.mass_mg = mass_dist(init_rng);      // Juvenil ninfal de mayo: M_j en [0.4, 0.9] mg
+                p.silk_length_m = silk_dist(init_rng); // Longitud efectiva de seda L_s,j
+                p.posture_chi = 0.85f;
+                // Partición entera exacta: la suma sobre las n_sim partículas es estrictamente total_props
+                p.weight = static_cast<float>(base_weight + (i < remainder ? 1 : 0));
+                p.origin_cell = cell.cell_id;
+                p.is_active = true;
+                if (auto it = emergence_.find(cell.cell_id); it != emergence_.end()) p.start_h = it->second;
+                particles_.push_back(p);
             }
         }
     }
@@ -111,23 +137,27 @@ public:
             return result;
         }
 
-        const float sqrt_dt = std::sqrt(dt_seconds);
         constexpr double deg_to_rad = M_PI / 180.0;
         constexpr double rad_to_deg = 180.0 / M_PI;
         constexpr float R_earth = 6371000.0f;
 
-        // Velocidad de sedimentación biológica exacta para Trichonephila clavata (~0.295 m/s)
-        const float vs_aero = compute_settling_velocity(0.6f, 1.2f, 0.85f);
+        // Cada partícula usa su propia M_j, L_s,j (M6)
         const Era5View atm = (atmosphere_resident_ && !eras_.empty()) ? eras_[active_].view : Era5View{};
+        const uint32_t year_idx = has_year_override_ ? year_idx_override_ : static_cast<uint32_t>(active_);
+        const float u_crit = kUCritTakeoffDefault;
+        const float flight_h = static_cast<float>(total_steps) * dt_seconds / 3600.0f;
+        const float span_h = atm.valid ? static_cast<float>(atm.n_hours - 1) - flight_h : 0.0f;
 
         auto k_start = std::chrono::high_resolution_clock::now();
         #pragma omp parallel
         {
+            // Semilla dinámica (M8): año y réplica Monte Carlo + hilo
             #if defined(JORO_HAS_OMP_HEADER)
-            std::mt19937 rng(42819 + omp_get_thread_num() * 10007);
+            const uint32_t thread_id = static_cast<uint32_t>(omp_get_thread_num());
             #else
-            std::mt19937 rng(42819);
+            const uint32_t thread_id = 0u;
             #endif
+            std::mt19937 rng((42819u ^ (year_idx * 0x85EBCA6Bu) ^ mc_seed_) + thread_id * 10007u);
             std::normal_distribution<float> normal_dist(0.0f, 1.0f);
             std::uniform_real_distribution<float> unif01_dist(0.0f, 1.0f);
             auto unif01 = [&](std::mt19937& g) { return unif01_dist(g); };
@@ -137,18 +167,40 @@ public:
                 auto& p = particles_[i];
                 if (!p.is_active) continue;
 
-                // Hora de liberación dentro de la ventana ERA5 (igual que el kernel GPU)
+                const float v_sed = compute_settling_velocity(p.mass_mg, p.silk_length_m, p.posture_chi);
+
+                // Hora y día de despegue con compuerta biomecánica u10 < u_crit (M3), igual que el kernel GPU:
+                // hasta 4 días candidatos distintos (+1 a +3 d entre reintentos) antes de la retención local
                 float t0_h = 0.0f;
-                if (atm.valid) {
-                    const float span = static_cast<float>(atm.n_t - 1) - static_cast<float>(total_steps) * dt_seconds / 3600.0f;
-                    t0_h = span > 0.0f ? span * unif01(rng) : 0.0f;
+                bool takeoff_ok = !atm.valid;
+                float u_day0 = 0.0f;
+                int day_offset = 0;
+                if (!atm.valid) {
+                    const float ud = unif01(rng);
+                    const float uh = unif01(rng);
+                    t0_h = candidate_takeoff_hour(p.x, span_h, false, ud, uh, 0, 0.0f);
+                }
+                for (int a = 0; a < kTakeoffMaxAttempts && !takeoff_ok; ++a) {
+                    if (a == 0) u_day0 = unif01(rng); else day_offset += takeoff_retry_day_step(unif01(rng));
+                    const float cand = candidate_takeoff_hour(p.x, span_h, true, u_day0, unif01(rng), day_offset, p.start_h);
+                    if (cand < 0.0f) continue;
+                    float ws10 = 0.0f, blh0 = 0.0f;
+                    atm.sample_surface(p.origin_x, p.origin_y, cand, ws10, blh0);
+                    if (ws10 < u_crit) { t0_h = cand; takeoff_ok = true; }
+                }
+                if (!takeoff_ok) {
+                    // Viento fuerte en todos los días candidatos: retención local (sin vuelo distante)
+                    p.z = 0.0f;
+                    p.is_active = false;
+                    p.retained = true;
+                    continue;
                 }
 
                 for (int step = 0; step < total_steps; ++step) {
-                    float sim_time_s = step * dt_seconds;
-                    // Ciclo diurno convectivo diurno (térmicas de ascenso)
-                    float diurnal_phase = std::sin(2.0f * static_cast<float>(M_PI) * (sim_time_s / 86400.0f));
-                    float w_convective = (diurnal_phase > 0.0f) ? (0.20f * diurnal_phase) : 0.0f;
+                    const float sim_time_s = step * dt_seconds;
+                    const float t_h = t0_h + sim_time_s / 3600.0f;
+                    // Fase convectiva con hora solar local real (M2)
+                    const float phase = diurnal_phase(local_solar_hour(t_h, p.x));
 
                     // Viento advectivo medio horizontal y vertical sinóptico (ERA5 residente o uniforme heredado)
                     float u_wind = 4.0f;
@@ -157,14 +209,16 @@ public:
                     float blh = 1200.0f;
                     if (atm.valid) {
                         float b = 0.0f;
-                        atm.sample(p.x, p.y, p.z, t0_h + sim_time_s / 3600.0f, u_wind, v_wind, w_mean, b);
+                        atm.sample(p.x, p.y, p.z, t_h, u_wind, v_wind, w_mean, b);
                         blh = std::clamp(b, 250.0f, 3000.0f);
                     }
 
-                    // Turbulencia vertical de Langevin
-                    auto lang = compute_langevin_well_mixed(p.w_prime, p.z, blh);
-                    float dW = normal_dist(rng) * sqrt_dt;
-                    p.w_prime += lang.a_w * dt_seconds + lang.b_w * dW;
+                    // Turbulencia vertical de Langevin inhomogénea con deriva de Thomson (M4)
+                    const float speed = std::sqrt(u_wind * u_wind + v_wind * v_wind);
+                    p.w_prime = langevin_advance(p.w_prime, p.z, blh, friction_velocity(speed),
+                                                 convective_velocity_scale(phase, blh), dt_seconds,
+                                                 normal_dist(rng));
+                    const float w_convective = convective_updraft(phase, p.z, blh);
 
                     // Cinemática horizontal esférica Euler-Maruyama
                     float cos_lat = std::max(0.01f, std::cos(static_cast<float>(p.y * deg_to_rad)));
@@ -173,7 +227,7 @@ public:
 
                     p.x += d_lon;
                     p.y += d_lat;
-                    p.z += (w_mean + w_convective + p.w_prime - vs_aero) * dt_seconds;
+                    p.z += (w_mean + w_convective + p.w_prime - v_sed) * dt_seconds;
 
                     // Techo de capa límite reflectante
                     if (p.z > blh) {
@@ -201,6 +255,7 @@ public:
         uint64_t total_released_acc = 0;
         uint64_t total_landed_acc = 0;
         uint64_t total_escaped_acc = 0;
+        uint64_t total_retained_acc = 0;
 
         #pragma omp parallel
         {
@@ -212,6 +267,7 @@ public:
             uint64_t loc_rel = 0;
             uint64_t loc_land = 0;
             uint64_t loc_esc = 0;
+            uint64_t loc_ret = 0;
 
             #pragma omp for schedule(static)
             for (size_t i = 0; i < particles_.size(); ++i) {
@@ -227,6 +283,13 @@ public:
 
                 if (!p.is_active) {
                     loc_land += w;
+                    if (p.retained) {
+                        // Retención local: cuenta en el balance demográfico (celda de origen) pero NO en los
+                        // diagnósticos de distancia de vuelo efectivo
+                        loc_ret += w;
+                        local_arrivals[p.origin_cell] += w;
+                        continue;
+                    }
                     local_distances.emplace_back(dist_km, w);
 
                     int32_t dest_cell_id = spatial_lookup_.find_cell(p.x, p.y);
@@ -243,6 +306,7 @@ public:
                 total_released_acc += loc_rel;
                 total_landed_acc += loc_land;
                 total_escaped_acc += loc_esc;
+                total_retained_acc += loc_ret;
                 landed_distances_km.insert(landed_distances_km.end(), local_distances.begin(), local_distances.end());
                 for (const auto& [cid, count] : local_arrivals) {
                     result.arrivals_per_cell[cid] += count;
@@ -253,6 +317,7 @@ public:
         result.total_released = total_released_acc;
         result.total_landed = total_landed_acc;
         result.total_escaped = total_escaped_acc;
+        result.total_retained = total_retained_acc;
 
         if (!landed_distances_km.empty()) {
             double sum_wd = 0.0;
@@ -280,6 +345,12 @@ private:
     std::vector<Era5Pack> eras_;
     size_t active_ = 0;
     bool atmosphere_resident_ = false;
+    size_t max_super_ = kDefaultMaxSuperPerDispatch;
+    int time_stride_ = []() { const char* e = std::getenv("JORO_ERA5_TIME_STRIDE"); return e ? std::max(1, std::atoi(e)) : 1; }();
+    uint32_t mc_seed_ = 0;
+    uint32_t year_idx_override_ = 0;
+    bool has_year_override_ = false;
+    std::unordered_map<int32_t, float> emergence_;   ///< Inicio de la ventana de despegue por celda (h tras el 1 de mayo)
 };
 
 std::unique_ptr<LpdmEngine> create_cpu_baseline_engine() {

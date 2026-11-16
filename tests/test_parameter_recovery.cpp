@@ -2,6 +2,8 @@
 #include "inference/cost_function.hpp"
 #include "abm/carrying_capacity.hpp"
 #include "test_common.hpp"
+#include "common/spatial_grid_lookup.hpp"
+#include "inference/dispersal_kernels.hpp"
 #include <iostream>
 #include <vector>
 #include <cmath>
@@ -135,6 +137,79 @@ int main() {
         JORO_TEST_ASSERT(brier_pos(0.30 + d) < brier_pos(0.30) && brier_neg(0.30 + d) > brier_neg(0.30),
                          "Brier de positivos/negativos debe ser monótono respecto a P_hat");
         std::cout << "  ✔ Reparametrización K_i (M0/M1) y enlace a0/b0 verificados.\n";
+    }
+
+
+    // ── Bloque 2: H_hab sobre el soporte S, colonización cloglog, f_est y kernel humano ──
+    {
+        using joro::abm::compute_habitat_index;
+        std::mt19937 rng(11);
+        std::normal_distribution<float> nd(0.0f, 1.0f);
+        std::vector<joro::GridCell> cells(4000);
+        std::vector<int32_t> support_ids;
+        for (size_t i = 0; i < cells.size(); ++i) {
+            auto& c = cells[i];
+            c.cell_id = static_cast<int32_t>(i);
+            const bool in_s = i < 800;                 // soporte informativo: celdas de la región invadida (más bosque/borde)
+            c.z_borde = nd(rng) + (in_s ? 1.0f : 0.0f);
+            c.z_imp = nd(rng) + (in_s ? 0.5f : 0.0f);
+            c.z_dosel = nd(rng);
+            c.centroid_lon = -84.0f + 0.045f * static_cast<float>(i % 80);
+            c.centroid_lat = 33.0f + 0.045f * static_cast<float>(i / 80);
+            c.pop_density_h = std::abs(nd(rng)); c.road_density_r = std::abs(nd(rng));
+            if (in_s) support_ids.push_back(c.cell_id);
+        }
+        const auto mask = joro::abm::make_support_mask(cells, support_ids);
+        compute_habitat_index(cells, &mask);
+        double m_s = 0.0, v_s = 0.0;
+        for (size_t i = 0; i < 800; ++i) m_s += cells[i].h_hab;
+        m_s /= 800.0;
+        for (size_t i = 0; i < 800; ++i) v_s += (cells[i].h_hab - m_s) * (cells[i].h_hab - m_s);
+        v_s /= 799.0;
+        JORO_TEST_ASSERT(std::abs(m_s) < 1e-4 && std::abs(v_s - 1.0) < 1e-3, "M14: H_hab debe tener media 0 y varianza 1 sobre el soporte S");
+        compute_habitat_index(cells);
+        double m_all = 0.0;
+        for (size_t i = 0; i < 800; ++i) m_all += cells[i].h_hab;
+        JORO_TEST_ASSERT(std::abs(m_all / 800.0) > 0.3, "Estandarizar sobre Omega deja m_S != 0 (colinealidad estructural, M14)");
+
+        using joro::inference::OccupancyParameters;
+        using joro::inference::compute_colonization_gamma;
+        OccupancyParameters op;
+        JORO_TEST_ASSERT(compute_colonization_gamma(0.0f, 0.5f, op) == 0.0f, "M12: gamma = 0 exacto si A_total = 0 (sin generación espontánea)");
+        const float g1 = compute_colonization_gamma(1.0f, 0.0f, op), g100 = compute_colonization_gamma(100.0f, 0.0f, op);
+        JORO_TEST_ASSERT(g1 > 0.0f && g100 > g1 && g100 < 1.0f, "M12: gamma cloglog crece monótonamente con A_total");
+        const float lam = std::exp(op.a0);   // a1 = 1, H = 0 => gamma(A) = 1 - exp(-A e^{a0})
+        JORO_TEST_ASSERT(std::abs(g100 - (1.0f - std::exp(-100.0f * lam))) < 1e-5f, "M12: forma 1 - exp(-lambda A) del enlace cloglog");
+        JORO_TEST_ASSERT(joro::inference::total_arrivals(10.0f, 3.0f, 0.0f) == 13.0f && joro::inference::total_arrivals(10.0f, 0.0f, 0.1f) == 9.0f,
+                         "A_total = (1 - p_h) A_LPDM + A_hum");
+
+        // M13: f_est crece con la atención M_t y decrece con la edad local de invasión (habituación)
+        JORO_TEST_ASSERT(joro::inference::compute_f_est(3.0f, 0.0f, op) > joro::inference::compute_f_est(0.5f, 0.0f, op) &&
+                         joro::inference::compute_f_est(1.0f, 5.0f, op) < joro::inference::compute_f_est(1.0f, 0.0f, op),
+                         "M13: f_est monótono en M_t y tau");
+
+        // Kernel humano: conservación Σ A_i + pérdidas = propágulos muestreados; p_h = 0 => sin transporte
+        const auto cidx = joro::abm::CellIndexTable::build(cells);
+        joro::SpatialGridLookup sgl; sgl.build(cells);
+        std::vector<float> hn(cells.size()), rn(cells.size());
+        for (size_t i = 0; i < cells.size(); ++i) { hn[i] = std::min(1.0f, cells[i].pop_density_h / 3.0f); rn[i] = std::min(1.0f, cells[i].road_density_r / 3.0f); }
+        joro::inference::HumanTransportKernel hk;
+        rn[10] = 0.90f;
+        rn[500] = 0.10f;
+        hk.build(cells, hn, rn, sgl.view(), &cidx);
+        std::vector<std::pair<int32_t, float>> src = {{10, 50000.0f}, {500, 20000.0f}};
+        const auto none = hk.transport(src, 0.0, 150.0, 1);
+        JORO_TEST_ASSERT(none.arrivals.empty() && none.transported == 0, "p_h = 0 recupera el modelo puramente atmosférico");
+        const auto res = hk.transport(src, 0.05, 40.0, 7);
+        uint64_t placed = 0;
+        for (const auto& kv : res.arrivals) placed += kv.second;
+        JORO_TEST_ASSERT(res.transported > 1000 && placed + res.lost == res.transported, "Kernel humano: conservación Σ A_i + L = propágulos transportados");
+        const auto res_hi_r = hk.transport({{10, 50000.0f}}, 0.05, 40.0, 7);
+        const auto res_lo_r = hk.transport({{500, 50000.0f}}, 0.05, 40.0, 7);
+        JORO_TEST_ASSERT(res_hi_r.transported > 5 * res_lo_r.transported, "Kernel humano: emisión ponderada por R_j de la celda origen");
+        const auto res2 = hk.transport(src, 0.05, 40.0, 7);
+        JORO_TEST_ASSERT(res2.transported == res.transported && res2.arrivals.size() == res.arrivals.size(), "Kernel humano determinista por semilla");
+        std::cout << "  ✔ Bloque 2: H_hab sobre S, cloglog, f_est y kernel humano (" << res.transported << " propágulos) verificados.\n";
     }
 
     std::cout << "✔ test_parameter_recovery PASÓ: Identificabilidad numérica confirmada.\n";

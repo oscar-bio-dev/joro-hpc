@@ -1,8 +1,6 @@
-<div align="center">
-
 # JORO-HPC 🕷️
 
-### Multiscale Mechanistic Simulator for *Trichonephila clavata* Invasions: 3D Lagrangian Atmospheric Dispersion (LPDM) Coupled with Agent-Based Demographics (ABM)
+## Multiscale Mechanistic Simulator for *Trichonephila clavata* Invasions: 3D Lagrangian Atmospheric Dispersion (LPDM) Coupled with Agent-Based Demographics (ABM)
 
 [![Language](https://img.shields.io/badge/Language-C%2B%2B20-blue.svg?style=for-the-badge&logo=c%2B%2B)](https://en.cppreference.com/w/cpp/20)
 [![Compiler](https://img.shields.io/badge/Compiler-Intel_oneAPI_icpx-0071C5.svg?style=for-the-badge&logo=intel)](https://www.intel.com/content/www/us/en/developer/tools/oneapi/overview.html)
@@ -13,13 +11,11 @@
 [![CI](https://img.shields.io/badge/CI-GitHub_Actions-2088FF.svg?style=for-the-badge&logo=githubactions)](https://github.com/oscar-bio-dev/joro-hpc/actions)
 [![License](https://img.shields.io/badge/License-Apache_2.0-green.svg?style=for-the-badge)](LICENSE)
 
-**Principal Investigator:** Oscar Mora  
-**Institution:** EcoTechLab · Pueblo West, Colorado  
-**Platform Target:** Intel Core i9-11900K (Rocket Lake AVX-512) · Intel Arc A770 16 GB (Level-Zero SYCL)  
-**Development / validation hardware:** all benchmarks and validations reported here were run on the development GPU **Intel Arc A380** (6 GB); the code is ready for the Arc A770 target, which has not been measured yet.  
-**Release:** v1.0.0 · cite with [`CITATION.cff`](CITATION.cff) · changes in [`CHANGELOG.md`](CHANGELOG.md)
-
-</div>
+- **Principal Investigator:** Oscar Mora
+- **Institution:** EcoTechLab · Pueblo West, Colorado
+- **Platform Target:** Intel Core i9-11900K (Rocket Lake AVX-512) · Intel Arc A770 16 GB (Level-Zero SYCL)
+- **Development / validation hardware:** all benchmarks and validations reported here were run on the development GPU **Intel Arc A380** (6 GB); the code is ready for the Arc A770 target, which has not been measured yet.
+- **Release:** v2.0.0 · cite with [`CITATION.cff`](CITATION.cff) · changes in [`CHANGELOG.md`](CHANGELOG.md)
 
 ---
 
@@ -30,6 +26,7 @@
 $$\text{Atmospheric Arrival } (A_{i,t}) \implies \text{Ecophysiological Establishment } (S_{j,t}) \implies \text{Reproduction \& Densodependence } (B_{i,t}) \implies \text{Multi-year Persistence } (Z_{i,t})$$
 
 The simulation explicitly resolves:
+
 1. **Phase 1: Aerial Dispersal (LPDM on GPU):** 3D Lagrangian stochastic particle trajectories driven by 12 pressure levels of hourly ERA5 reanalysis ($1000\text{--}700\text{ hPa}$), vertical Langevin turbulence satisfying the Thomson (1987) well-mixed criterion, and posture-dependent silk settling aerodynamics ($v_s(M, L_s, \chi)$).
 2. **Phase 2: Terrestrial Life Cycle (ABM on CPU):** Degree-day physiological development ($Q_{10}$), winter chill injury accumulation ($D_{j,t}$), negative binomial reproduction ($B_{i,t}$), and habitat-driven carrying capacity ($K_i$) parameterized by 30 m NLCD land cover aggregated to 5 km equal-area grid cells (EPSG:5070).
 3. **Phase 3: Observation & Latent State Invariance:** Dynamic occupancy modeling decoupling true presence ($Z_{i,t}$) from opportunistic citizen-science detection ($Y_{i,t}$) using Araneae Target-Group Background (TGB) sampling effort ($E_{i,t}^{\rm Araneae}$).
@@ -38,7 +35,7 @@ The simulation explicitly resolves:
 
 ## 🏗️ Architecture & Coupled Loop
 
-```
+```text
   ┌────────────────────────────────────────────────────────────────────────┐
   │              3D ATMOSPHERIC FORCING (ERA5 via NetCDF4)                 │
   │    12 isobaric levels (1000–700 hPa) for u, v, omega, T + 5 surface vars│
@@ -81,6 +78,7 @@ The simulation explicitly resolves:
 ## 🔬 Mathematical Formulations
 
 ### 1. 3D Atmospheric Kinematics & Vertical Langevin Turbulence
+
 For each ballooning spider $j$ at position $\mathbf{X}_j = (X_j, Y_j, Z_j)^\top$:
 $$\begin{aligned}
 dX_j &= U(\mathbf{X}_j, t) dt \\
@@ -95,21 +93,25 @@ To avoid unphysical particle clustering in regions of low diffusivity, the drift
 $$a_w = -\frac{w'}{\tau_L} + \frac{1}{2}\frac{\partial \sigma_w^2}{\partial z} + \frac{w'^2}{2\sigma_w^2}\frac{\partial \sigma_w^2}{\partial z}, \qquad b_w = \sqrt{\frac{2\sigma_w^2}{\tau_L}}$$
 
 ### 2. Aerodynamic Settling Velocity ($v_s$)
+
 $$\begin{aligned}
 v_{s,j} &= \frac{M_j \cdot g}{C_{\rm drag}^{\rm silk}(L_{s,j}, d_{\rm silk}, \mu_a) + C_{\rm drag}^{\rm body}(M_j, \chi_j, \mu_a)}
 \end{aligned}$$
 where $\chi \in [0.5, 1.0]$ is the posture coefficient (0.5 for compact freefall, 1.0 for fully spread-eagled parachuting), $M \in [0.2, 25.0]\text{ mg}$, and $L_s \in [0.05, 2.30]\text{ m}$.
 
 ### 3. Winter Chill Injury Accumulation
+
 Instead of an unrealistic static temperature threshold, overwintering egg sac mortality follows cumulative thermal stress:
 $$D_{j,t+1} = D_{j,t} + \alpha_s \left[\max(0, T_{c,s} - T_{j,t}^{\rm micro})\right]^{\beta_s} \Delta t$$
 $$P(S_{j,t+1}=1 \mid S_{j,t}=1) = \exp[-(D_{j,t+1} - D_{j,t})]$$
 
 ### 4. Habitat Carrying Capacity ($K_i$) from NLCD
+
 Aggregated 30 m NLCD layers to 5 km equal-area grid cells (EPSG:5070):
 $$K_i = \min\left\{ K_{\max}, \max\left[ K_{\min}, K_0 \exp\left( \gamma_1 Z_{\rm imp, i} + \gamma_2 Z_{\rm borde, i} + \gamma_3 Z_{\rm dosel, i} \right) \right] \right\}$$
 
 ### 5. Imperfect Detection with Target-Group Background (TGB)
+
 $$\operatorname{logit}(p_{i,t}) = \beta_0 + \beta_1 \log(1 + E_{i,t}^{\rm Araneae}) + \beta_2 H_i + \beta_3 R_i + f_{\rm est}(t) + u_{\rm platform}$$
 where $E_{i,t}^{\rm Araneae}$ is the observation count of order Araneae in cell $i$ and year $t$, isolating true biological absence from lack of citizen-science observer effort.
 
@@ -120,46 +122,43 @@ where $E_{i,t}^{\rm Araneae}$ is the observation count of order Araneae in cell 
 | Component | Target Architecture | Implementation Technique | Empirical Benchmark |
 | :--- | :--- | :--- | :--- |
 | **Demographic ABM** | Intel Core i9-11900K | 64-byte aligned SoA (`CohortSoA`), AVX-512 OpenMP SIMD | **$877.6\text{ M}$ cohort updates/sec** ($2.28\text{ ms}$ for $2\times 10^6$ agents) |
-| **3D LPDM Advection** | Intel Arc A380 (dev. GPU; A770 pending) | DPC++/SYCL kernel, Device USM, Level-Zero runtime | **$9.40\text{ ms}$** allocation/fill for $1\times 10^6$ particles |
-| **ERA5 Atmospheric I/O** | NVMe Storage / Host RAM | Direct NetCDF-C / HDF5 chunked streaming | **$\sim 42\text{--}50\text{ GB}$** bypassed from SQL, zero DB lock |
-| **Spatial Database** | PostgreSQL 16 + PostGIS 3.4 | EPSG:5070 Conus Albers ($25\text{ km}^2$ equal-area grid) | GIST spatial indexing across $\sim 200{,}000$ cells |
+| **3D LPDM Advection** | Intel Arc A380 (dev. GPU; A770 pending) | DPC++/SYCL kernel, `FP16` (`Wind4Half`), Device USM, Level-Zero | **$3.64\text{ GiB}$ VRAM** for 6 full 92-day seasons (`JORO_ERA5_TIME_STRIDE=3`, $0\text{ B}$ H2D per eval) |
+| **ERA5 Atmospheric I/O** | NVMe Storage / Host RAM | Multi-month NetCDF4 seasonal ingestion (May–July, $2{,}208\text{ h/yr}$) | **33 seasonal NetCDF4 files** ($2014\text{--}2024$), `FP16` compression ($2\times$ reduction) |
+| **Spatial Database** | PostgreSQL 16 + PostGIS 3.4 | EPSG:5070 Conus Albers ($25\text{ km}^2$ equal-area grid) | GIST spatial indexing across $256{,}020$ cells; tripartite GBIF+iNat+EDDMapS fusion |
 
-Calibration of the 2,000-evaluation continental budget and the full blind validation (439 ensemble members × 11 simulated years) run in
-tens of seconds on the development machine (`joro_evaluate`: 29.4 s wall time; see [`docs/reports/04_Out_of_Sample_Validation_2020_2024.md`](docs/reports/04_Out_of_Sample_Validation_2020_2024.md)
-and the hardware profile in [`docs/telemetry/calibration_hardware_profile.json`](docs/telemetry/calibration_hardware_profile.json)).
+Calibration of the 2,000-evaluation continental budget over the full 92-day season (May–July) runs in **119.9 s** for $\mathcal{M}_1$ (`83.8 s` for $\mathcal{M}_0$, `127.6 s` for $\mathcal{M}_3$), and the full blind validation (`339` ensemble members $\times$ 11 simulated years + null comparators) runs in **211.9 s** wall time (`0.215 s` per 11-year member; see [`docs/reports/04_Out_of_Sample_Validation_2020_2024.md`](docs/reports/04_Out_of_Sample_Validation_2020_2024.md) and [`docs/telemetry/calibration_hardware_profile.json`](docs/telemetry/calibration_hardware_profile.json)).
 
 ---
 
-## 📈 Audited Results (v1.0.0)
+## 📈 Audited Results (`v2.0.0` — Full 92-Day Season & Tripartite GBIF+iNat+EDDMapS Dataset)
 
-All figures below are produced by `joro_evaluate` + `scripts/python/compute_validation_metrics.py` and copied from the reports; the parameters were frozen
-with 2014–2019 data and **never re-tuned** on 2020–2024 (199,602 cell-year rows, 2,442 observed presences).
+All figures below are produced by `joro_evaluate` + `scripts/python/compute_validation_metrics.py` and copied from the reports; the parameters were frozen with 2014–2019 data (`108` presences, exogenous effort $E_{i,t}^{-J} = \max(0, C_{i,t}^{\text{Araneae}} - C_{i,t}^J)$) and **never re-tuned** on 2020–2024 (`199,602` cell-year rows, `2,787` blind observed presences).
 
-| Metric (2020–2024) | JORO-HPC $\mathcal{M}_1$ | Isotropic kernel (H2) | Static SDM (H1) |
-| :--- | :---: | :---: | :---: |
-| AUC-ROC | **0.9712** | 0.8884 | 0.9043 |
-| Log-Loss | **0.0425** | 0.0661 | 0.0634 |
-| Brier (global) | **0.01079** | 0.01113 | 0.01159 |
-| PR-AUC | 0.4475 | **0.5057** | 0.1619 |
-| False positives north of 38 °N | **0.00 %** | 0.00 % | 9.33 % |
-| Interannual-persistence Brier | 0.4683 | 0.4830 | **0.4554** |
+| Metric (2020–2024) | JORO-HPC $\mathcal{M}_1$ (MAP) | JORO-HPC $\mathcal{M}_1 + K_{\text{mixto}}$ | JORO-HPC $\mathcal{M}_0$ ($K_0$ const.) | Isotropic kernel (H2) | Static SDM (H1) |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **AUC-ROC** | 0.9217 | **0.9245** | 0.9113 | 0.8921 | 0.8952 |
+| **Log-Loss** | 0.0545 | **0.0537** | 0.0613 | 0.0629 | 0.0743 |
+| **Brier (global)** | 0.01094 | 0.01094 | 0.01227 | **0.01045** | 0.01329 |
+| **Brier (balanced, 350 km)** | 0.31759 | 0.31812 | **0.31628** | 0.34324 | 0.44285 |
+| **PR-AUC** | 0.3532 | 0.3497 | 0.2786 | **0.4182** | 0.1592 |
+| **Cox Calibration Slope ($c_1$)** | 0.641 | **0.645** | 0.575 | 0.642 | 0.586 |
+| **False positives north of 38°N** | **0.00 %** | **0.00 %** | **0.00 %** | 0.00 % | 9.79 % |
+| **Interannual-persistence Brier** | **0.3370** | — | 0.3381 | 0.3517 | 0.4870 |
+| **New-ecoregion Brier (Blocks 2, 7–12)** | 0.00246 | **0.00243** | 0.00263 | 0.00248 | 0.00355 |
 
-**Verdicts (rule-based, report 04):** H1 *supported with caveats* (7/8 criteria; fails persistence Brier vs the SDM) and H2 *supported with caveats*
-(6/8; fails PR-AUC and angular error).
+### Key v2.0.0 Findings & Hypothesis Verdicts (Report 04)
 
-**Honest limitations**
-* **Absolute magnitude.** The ensemble ranks cells well but underestimates annual detection totals (observed/median ≈ 4–8×). A logit prevalence offset fitted
-  *only* on 2014–2019 (δ ≈ +0.63 for the MAP; 57.7 → 106 expected presences) reduces the gap to ≈ 2.4–4.9× but the P5–P95 band still covers no year (Table 5, report 04).
-* **Front direction.** With azimuth measured from the centroid of the 124 seed cells, the mean angular error of $\mathcal{M}_1$ (≈ 160°) is larger than that of the isotropic
-  kernel (≈ 125°): the 3D transport does not improve the direction of expansion. Front radius is better (P95 error 6.1 km vs 153.2 km in 2024).
-* **Identifiability.** `gamma_hab`, `k0` and `a0` are strongly collinear (|ρ| up to 0.96; report 03); interpret them jointly.
-* **Transect.** With nominal demographic parameters persistence fails north of ≈ 34 °N (report 02).
+- **H1 (Thermal restriction & physiological memory):** *Supported with caveats* (`6/8` criteria). $\mathcal{M}_1$ outperforms the static SDM across global AUC-ROC (`0.9217` vs `0.8952`), Log-Loss (`0.0545` vs `0.0743`), global Brier (`0.01094` vs `0.01329`), northern false-positive rate (`0.00 %` vs `9.79 %`), new-ecoregion Brier (`0.00246` vs `0.00355`), and interannual persistence Brier (`0.3370` vs `0.4870`).
+- **H2a / H2b (3D atmospheric LPDM & road-weighted human kernel $K_{\text{mixto}}$):** While the isotropic kernel ($\lambda^* = 8.0\text{ km}$) has a lower global radial P95 MAE (`19.3 km` vs `102.0 km`), it severely underpredicts the **northeast (NE) invasion corridor** (`104.0 km` vs `270.6 km` observed), whereas JORO-HPC $\mathcal{M}_1$ (`256.8 km`) and $\mathcal{M}_1 + K_{\text{mixto}}$ (`263.0 km`) accurately capture the NE expansion and achieve higher global discrimination (AUC-ROC `0.9245` vs `0.8921`, Log-Loss `0.0537` vs `0.0629`).
+- **H3a (Synanthropic carrying capacity $\mathcal{M}_1$ vs $\mathcal{M}_0$):** Standardizing $H_i^{\text{hab}}$ on the informative support $S$ (`4,967` cells) reduced parameter collinearity $\rho(K_0, \gamma_{\text{hab}})$ from `-0.92` (`v1.0.0`) to **`-0.38`** (`v2.0.0`), with `0` parameters truncated at prior bounds (`< 3.8 %`) and $\gamma_{\text{hab}}$ median `1.652` (`90% CI: [0.088, 1.954]`). Out-of-sample, $\mathcal{M}_1$ outperforms constant-capacity $\mathcal{M}_0$ on AUC-ROC (`0.9217` vs `0.9113`), Brier (`0.01094` vs `0.01227`), PR-AUC (`0.3532` vs `0.2786`), and Log-Loss (`0.0545` vs `0.0613`), and correlates positively with observed CPUE ($\rho_{\text{Spearman}} = +0.1000$).
+- **H3b (Non-stationary observation process $f_{\text{est}}(i,t)$):** Incorporating exogenous media attention ($M_t / M_{2019}$, peaking at $\times 3.48$ in 2024) and local habituation ($\tau_{i,t}$) with $(\lambda_M, \kappa_\tau) = (1.15, 0.25)$ predicts **`2,849.5` total detections** across 2020–2024 vs **`2,787` observed** (`+2.2 %` error, without any Platt intercept offset $\delta$), compared to `859.2` detections for the stationary raw model ($f_{\text{est}} = 0$). Furthermore, the $\Theta_{\text{comp}}$ ensemble (`339` members) covers the observed annual prevalence within its 5–95% interval in **3 of 5 years** (`2020, 2023, 2024`; `0/5` in `v1.0.0`) with **91.92 %** cell-level empirical coverage (nominal `90.0 %`).
+- **Temporal Resolution Sensitivity (`1 h` vs `3 h`):** Evaluating $\hat{\theta}_{\text{MAP}}$ with all `2,208` hourly steps (`1 h`) vs `737` synoptic steps (`3 h`, interpolated every 60 s in the SYCL kernel) yields $|\Delta\text{AUC-ROC}| = 0.0003$ (`0.9214` vs `0.9217`), $|\Delta\text{Brier}| = 0.00003$, and $|\Delta P_{95}| = 4.2\text{ km}$ (`1.65 %`).
 
 ---
 
 ## 📂 Repository Structure
 
-```
+```text
 joro-hpc/
 ├── .github/
 │   └── workflows/
@@ -192,11 +191,11 @@ joro-hpc/
 ├── src/
 │   ├── main.cpp                       # `joro_hpc`: coupled simulation, calibration (`--calibrate`), transect (`--transect`) & Morris (`--morris`)
 │   ├── joro_evaluate.cpp              # `joro_evaluate`: frozen blind validation 2020–2024, null models, prevalence offset
-│   ├── common/                        # types.hpp, config_parser.hpp, spatial_grid_lookup.hpp (O(1))
-│   ├── io/                            # era5_netcdf_reader, postgis_client
-│   ├── lpdm/                          # lpdm_engine, cpu_baseline, sycl_kernel, langevin, settling
-│   ├── abm/                           # abm_state_soa, abm_engine, carrying_capacity
-│   ├── inference/                     # occupancy_model, cost_function, morris_screening, simulated_annealing
+│   ├── common/                        # types.hpp, config_parser.hpp, spatial_grid_lookup.hpp (O(1)), model_geometry.hpp
+│   ├── io/                            # era5_netcdf_reader (seasonal May–Jul), postgis_client
+│   ├── lpdm/                          # lpdm_engine, cpu_baseline, sycl_kernel, era5_view (FP16), device_math, superparticle_policy, langevin, settling
+│   ├── abm/                           # abm_state_soa, abm_engine, carrying_capacity (M0/M1/M3)
+│   ├── inference/                     # occupancy_model (cloglog + f_est), dispersal_kernels (K_mixto), cost_function, morris_screening, simulated_annealing
 │   └── community/                     # diversity_metrics (Chao2, Hill numbers, Jaccard)
 ├── tests/
 │   ├── test_well_mixed.cpp            # Thomson (1987) Eulerian density preservation test
@@ -213,9 +212,10 @@ joro-hpc/
 ## 🚀 Getting Started
 
 ### 1. Prerequisites
-* **Operating System:** Linux (Ubuntu 22.04+, openSUSE Tumbleweed, RHEL 9+)
-* **Toolchain:** Intel oneAPI Base Toolkit & HPC Toolkit ($\ge 2024.1$)
-* **Libraries:** `libnetcdf-dev`, `libpqxx-dev` ($\ge 7.0$), `pkg-config`, `cmake` ($\ge 3.22$)
+
+- **Operating System:** Linux (Ubuntu 22.04+, openSUSE Tumbleweed, RHEL 9+)
+- **Toolchain:** Intel oneAPI Base Toolkit & HPC Toolkit ($\ge 2024.1$)
+- **Libraries:** `libnetcdf-dev`, `libpqxx-dev` ($\ge 7.0$), `pkg-config`, `cmake` ($\ge 3.22$)
 
 ```bash
 # Ubuntu / Debian
@@ -305,9 +305,9 @@ apptainer run --nv --bind /data:/data joro_hpc.sif ./build/joro_hpc
 
 ## 📊 Scientific Methodology & Validation
 
-* **Calibration Period (2014–2019):** Multi-start Simulated Annealing and Morris elementary effects sensitivity screening over 6 years of contiguous invasion history in the southeastern US.
-* **Out-of-Sample Evaluation (2020–2024):** Strict frozen evaluation without parameter re-tuning across independent spatial ecoregional blocks.
-* **Success Criteria:** Brier Score, calibration slope/intercept, front advance velocity, and directional displacement accuracy against two parsimonious null models:
+- **Calibration Period (2014–2019):** Multi-start Simulated Annealing and Morris elementary effects sensitivity screening over 6 years of contiguous invasion history in the southeastern US.
+- **Out-of-Sample Evaluation (2020–2024):** Strict frozen evaluation without parameter re-tuning across independent spatial ecoregional blocks.
+- **Success Criteria:** Brier Score, calibration slope/intercept, front advance velocity, and directional displacement accuracy against two parsimonious null models:
   1. Static Bioclimatic SDM (MaxEnt / Generalized Additive Model).
   2. Isotropic Exponential Kernel: $K_0(d \mid \lambda) = \lambda^{-1} e^{-d/\lambda}$.
 
@@ -335,11 +335,10 @@ git archive --format=zip --output=joro-hpc-clean.zip HEAD
 
 ## 👤 Author & Contact
 
-* **Oscar Mora**  
-  *Principal Investigator & Software Architect*  
-  GitHub: [@oscar-bio-dev](https://github.com/oscar-bio-dev)  
-  Email: [oscar_bio_dev@outlook.com](mailto:oscar_bio_dev@outlook.com)  
-  EcoTechLab · Pueblo West, Colorado
+- **Oscar Mora** — *Principal Investigator & Software Architect*
+  - GitHub: [@oscar-bio-dev](https://github.com/oscar-bio-dev)
+  - Email: [oscar_bio_dev@outlook.com](mailto:oscar_bio_dev@outlook.com)
+  - Affiliation: EcoTechLab · Pueblo West, Colorado
 
 ---
 

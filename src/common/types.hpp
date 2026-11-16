@@ -40,6 +40,8 @@ struct Particle3D {
     float weight = 1.0f;      ///< Peso de super-partícula (número de propágulos representados)
     uint32_t origin_cell = 0; ///< ID de la celda de origen en grid_5km
     bool is_active = true;    ///< True si está en suspensión, False si aterrizó o salió
+    float start_h = 0.0f;     ///< Inicio de la ventana de despegue [h desde el 1 de mayo 00 UTC] (emergencia escalonada)
+    bool retained = false;    ///< True si el vuelo distante se abortó (viento >= u_crit en todas las ventanas): retención local
     float origin_x = 0.0f;    ///< Longitud inicial de despegue [grados WGS84]
     float origin_y = 0.0f;    ///< Latitud inicial de despegue [grados WGS84]
 };

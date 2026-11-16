@@ -35,6 +35,15 @@ struct DemographicParameters {
     float t_max_dev = 35.0f;       ///< Umbral máximo de desarrollo (°C)
     float t_ref = 20.0f;           ///< Temperatura de referencia (°C)
     float r_ref = 0.010f;          ///< Tasa diaria de desarrollo a T_ref (~100 días a 20°C)
+
+    // Madurez reproductiva continua (M10): S_juv = logit^-1(kappa_dd (DD - 1))  en lugar del corte binario DD >= 1
+    float kappa_dd = 8.0f;         ///< Pendiente de la fracción de maduración (PROVISIONAL; sensibilidad a evaluar)
+    // Emergencia escalonada: desarrollo acumulado tras la eclosión (día 91) a partir del cual el juvenil puede despegar
+    float dd_emergence = 0.12f;    ///< Fracción del desarrollo total (PROVISIONAL)
+
+    // Amortiguamiento microclimático (Ec. 16): T_micro = T_ERA5 + delta_dosel Z_dosel + delta_imp Z_imp  [°C por unidad de Z]
+    float delta_dosel = 0.35f;
+    float delta_imp = 0.50f;       ///< Isla de calor urbana/estructuras (0.50 °C/SD, Ec. 16 v2.0)
 };
 
 /// Tabla densa cell_id -> posición en el vector de celdas (-1 si no existe).
@@ -60,6 +69,10 @@ struct DemographyYearSummary {
     
     /// Población adulta superviviente N_{i,t} por celda
     std::unordered_map<int32_t, float> adult_density_per_cell;
+
+    /// Emergencia escalonada: horas tras el 1 de mayo 00 UTC (inicio de la serie ERA5) a partir de las cuales los
+    /// juveniles de la celda pueden despegar (según el desarrollo térmico acumulado de cada celda; >= 0)
+    std::unordered_map<int32_t, float> emergence_hours_per_cell;
 
     /// Ratio medio de saturación N_i / K_i en celdas ocupadas
     float mean_saturation = 0.0f;
@@ -109,6 +122,9 @@ public:
         const std::vector<float>& mean_summer_temp_c);
 
     const CohortSoA& cohorts() const noexcept { return cohorts_; }
+
+    /// Ootecas vivas transportables por humanos (cell_id, ootecas) al inicio de la primavera: P^hum_{j,t} del kernel mixto
+    [[nodiscard]] std::vector<std::pair<int32_t, float>> transportable_ootecas() const;
     const DemographicParameters& params() const noexcept { return params_; }
     void set_params(const DemographicParameters& p) noexcept { params_ = p; }
 
@@ -116,10 +132,14 @@ public:
     /// Si no se registra, cada paso anual construye una tabla local equivalente.
     void set_cell_index(const CellIndexTable* table) noexcept { cell_index_ext_ = table; }
 
+    /// Réplica Monte Carlo (M8): se combina con el año en la semilla del RNG binomial de baloneo.
+    void set_mc_seed(uint32_t mc_seed) noexcept { mc_seed_ = mc_seed; }
+
 private:
     DemographicParameters params_;
     CohortSoA cohorts_;
     const CellIndexTable* cell_index_ext_ = nullptr;
+    uint32_t mc_seed_ = 0;
 };
 
 } // namespace joro::abm

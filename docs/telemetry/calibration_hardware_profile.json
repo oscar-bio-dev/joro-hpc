@@ -1,11 +1,11 @@
 {
   "schema": "joro-hpc/calibration_hardware_profile/v1",
-  "generated": "2026-10-19 21:31:16",
+  "generated": "2026-11-14 22:44:22",
   "platform": {
     "lpdm_device": "Intel(R) Arc(TM) A380 Graphics | Intel(R) oneAPI Unified Runtime over Level-Zero | GPU",
     "cpu": "11th Gen Intel(R) Core(TM) i9-11900K @ 3.50GHz",
     "omp_threads": 16,
-    "kernel": "7.2.9-1-default",
+    "kernel": "7.3.3-1-default",
     "compiler": "icpx (versión no disponible en este entorno)",
     "compile_flags": "-O3 -fsycl -qopenmp -march=rocketlake -std=c++20"
   },
@@ -13,19 +13,19 @@
   "note_gpu_metric": "gpu_busy_pct_rc6_based = 100 - residencia RC6 (actividad del GT, no del motor Compute).",
   "models": {
     "M1": {
-      "wall_s": 13.186955,
-      "compatible_members": 439,
+      "wall_s": 119.86827,
+      "compatible_members": 339,
       "internal_timers_s": {
-        "abm_s": 1.6287905,
-        "init_s": 0.040909455,
-        "h2d_s": 0.39889037,
-        "kernel_s": 8.478461,
-        "d2h_s": 0.65758034,
-        "reduce_s": 0.51969473,
-        "cost_s": 0.74759286,
-        "particles": 203424661,
+        "abm_s": 8.8904626,
+        "init_s": 0.33016125,
+        "h2d_s": 1.4772932,
+        "kernel_s": 104.04776,
+        "d2h_s": 1.1250141,
+        "reduce_s": 1.2140342,
+        "cost_s": 1.7191553,
+        "particles": 443260832,
         "cpu_fallbacks": 0,
-        "capped": 1343,
+        "capped": 2962,
         "evaluations": 2006
       },
       "external_sampling": {
@@ -74,19 +74,19 @@
       }
     },
     "M0": {
-      "wall_s": 12.045076,
-      "compatible_members": 74,
+      "wall_s": 83.777096,
+      "compatible_members": 332,
       "internal_timers_s": {
-        "abm_s": 1.5171047,
-        "init_s": 0.043024948,
-        "h2d_s": 0.3193513,
-        "kernel_s": 7.6942039,
-        "d2h_s": 0.47413125,
-        "reduce_s": 0.39079018,
-        "cost_s": 0.89487662,
-        "particles": 188150837,
+        "abm_s": 6.2396036,
+        "init_s": 0.55129545,
+        "h2d_s": 2.1967536,
+        "kernel_s": 175.7832,
+        "d2h_s": 2.2165551,
+        "reduce_s": 2.2857558,
+        "cost_s": 1.2620045,
+        "particles": 738483275,
         "cpu_fallbacks": 0,
-        "capped": 1170,
+        "capped": 4806,
         "evaluations": 2006
       },
       "external_sampling": {
@@ -135,19 +135,19 @@
       }
     },
     "M3": {
-      "wall_s": 16.066024,
-      "compatible_members": 38,
+      "wall_s": 127.61242,
+      "compatible_members": 363,
       "internal_timers_s": {
-        "abm_s": 1.7272189,
-        "init_s": 0.057293933,
-        "h2d_s": 0.30913341,
-        "kernel_s": 11.637461,
-        "d2h_s": 0.50970835,
-        "reduce_s": 0.42949244,
-        "cost_s": 0.64816406,
-        "particles": 300521177,
+        "abm_s": 9.4460232,
+        "init_s": 0.87822229,
+        "h2d_s": 3.1042116,
+        "kernel_s": 286.19354,
+        "d2h_s": 3.3518891,
+        "reduce_s": 3.4542478,
+        "cost_s": 2.4427659,
+        "particles": 1203116431,
         "cpu_fallbacks": 0,
-        "capped": 2304,
+        "capped": 8124,
         "evaluations": 2006
       },
       "external_sampling": {
