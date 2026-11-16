@@ -17,7 +17,6 @@ namespace jm {
 using sycl::cbrt;
 using sycl::cos;
 using sycl::exp;
-using sycl::floor;
 using sycl::log;
 using sycl::pow;
 using sycl::sin;
@@ -28,7 +27,6 @@ namespace jm {
 using std::cbrt;
 using std::cos;
 using std::exp;
-using std::floor;
 using std::log;
 using std::pow;
 using std::sin;
@@ -40,6 +38,18 @@ namespace jm {
 [[nodiscard]] inline float clampf(float x, float lo, float hi) noexcept { return x < lo ? lo : (x > hi ? hi : x); }
 [[nodiscard]] inline float maxf(float a, float b) noexcept { return a > b ? a : b; }
 [[nodiscard]] inline float minf(float a, float b) noexcept { return a < b ? a : b; }
+/// Piso portátil en `float`: en el dispositivo SYCL evita `sycl::floor` (`OpExtInst floor`), cuya
+/// legalización vectorial falla con ICE (`SplitVectorResult`) en el runtime OpenCL CPU de oneAPI 2023.0
+/// sobre CPUs AMD EPYC Zen4 con AVX-512 (runners de GitHub Actions).
+[[nodiscard]] inline float floor(float x) noexcept
+{
+#if defined(__SYCL_DEVICE_ONLY__)
+    const float t = sycl::trunc(x);
+    return (x < t) ? (t - 1.0f) : t;
+#else
+    return std::floor(x);
+#endif
+}
 /// Módulo para argumentos no negativos: a - b floor(a / b). Evita sycl::fmod, cuya implementación iterativa
 /// en el compilador del dispositivo es divergente por hilo y no es robusta dentro del bucle de integración.
 [[nodiscard]] inline float fmod(float a, float b) noexcept { return a - b * floor(a / b); }

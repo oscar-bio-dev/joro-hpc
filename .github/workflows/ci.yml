@@ -76,6 +76,10 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: intel/oneapi-hpckit:devel-ubuntu22.04
+    env:
+      # Mantiene el JIT OpenCL CPU de oneAPI 2023.0.0 en AVX2 (-DJORO_ENABLE_AVX512=OFF),
+      # evitando en EPYC Zen4 el desajuste de vectorización N=16 (__ocl_svml_z0_*16) con backend ymm.
+      CL_CONFIG_CPU_TARGET_ARCH: core-avx2
 
     steps:
       - name: Checkout repository
