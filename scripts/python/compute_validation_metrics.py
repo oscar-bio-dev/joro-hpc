@@ -116,7 +116,7 @@ def get_calibration_slope_intercept(p, y):
 
 
 def calc_balanced_brier(p, y, dists, radius=350.0):
-    """Brier balanceado: negativos solo dentro de la envolvente activa simulada del año (idéntico a joro_evaluate.cpp)."""
+    """Brier balanceado dentro de la envolvente activa simulada del año (igual que C++)."""
     pos_mask = y == 1
     neg_mask = (y == 0) & (dists <= radius)
     if pos_mask.sum() == 0 or neg_mask.sum() == 0:
@@ -138,14 +138,20 @@ def resolve_env_radius_by_year(df, seed_meta, sim_kin=None):
             if isinstance(v, dict) and v.get("env_radius_km") is not None:
                 env_map[int(k)] = float(v["env_radius_km"])
     if len(env_map) < 5:
-        thresh = float(seed_meta.get("front_prob_threshold", FRONT_PROB_THRESHOLD_DEFAULT))
+        thresh = float(
+            seed_meta.get("front_prob_threshold", FRONT_PROB_THRESHOLD_DEFAULT)
+        )
         cummax_front = 0.0
         for yr in sorted(df["year"].unique()):
             sub = df[df["year"] == yr]
             pred = sub[sub["p_m1_map"] > thresh]
             if len(pred) == 0:
                 pred = sub[sub["p_m1_map"] > 0.0]
-            p95 = float(np.percentile(pred["dist"].values, 95, method="linear")) if len(pred) else 5.0
+            p95 = (
+                float(np.percentile(pred["dist"].values, 95, method="linear"))
+                if len(pred)
+                else 5.0
+            )
             cummax_front = max(cummax_front, p95)
             env_map.setdefault(int(yr), 50.0 + cummax_front)
     return env_map
@@ -190,7 +196,9 @@ def main():
             sim_kin = json.load(kf)
     env_radius_by_year = resolve_env_radius_by_year(df, SEED, sim_kin)
     env_radius_rows = df["year"].map(env_radius_by_year).values.astype(float)
-    front_prob_threshold = float(SEED.get("front_prob_threshold", FRONT_PROB_THRESHOLD_DEFAULT))
+    front_prob_threshold = float(
+        SEED.get("front_prob_threshold", FRONT_PROB_THRESHOLD_DEFAULT)
+    )
 
     print("\n--- 1. DESEMPEÑO PROBABILÍSTICO GLOBAL (2020-2024) ---")
     for m_key, col in models.items():
@@ -281,16 +289,28 @@ def main():
         }
 
         for m_key, col in kin_models:
-            # Frente homólogo unificado C++/Python: probabilidades esperadas de detección E[Y_{i,t}] = psi*p_det > front_prob_threshold
+            # Frente homólogo C++/Python: E[Y_{i,t}] = psi * p_det > front_prob_threshold
             pred_cells = sub[sub[col] > front_prob_threshold]
             if len(pred_cells) == 0:
                 pred_cells = sub[sub[col] > 0.0]
             p_dists = pred_cells["dist"].values
             p_angles = pred_cells[pred_cells["dist_seed"] > seed_r]["angle"].values
 
-            m_p50 = float(np.percentile(p_dists, 50, method="linear")) if len(p_dists) else 0.0
-            m_p90 = float(np.percentile(p_dists, 90, method="linear")) if len(p_dists) else 0.0
-            m_p95 = float(np.percentile(p_dists, 95, method="linear")) if len(p_dists) else 0.0
+            m_p50 = (
+                float(np.percentile(p_dists, 50, method="linear"))
+                if len(p_dists)
+                else 0.0
+            )
+            m_p90 = (
+                float(np.percentile(p_dists, 90, method="linear"))
+                if len(p_dists)
+                else 0.0
+            )
+            m_p95 = (
+                float(np.percentile(p_dists, 95, method="linear"))
+                if len(p_dists)
+                else 0.0
+            )
             m_ang = float(circular_mean(p_angles)) if len(p_angles) else float("nan")
             rmse_front = float(
                 np.sqrt(
@@ -331,13 +351,23 @@ def main():
             for okey in ("obs_p50", "obs_p90", "obs_p95", "obs_angle"):
                 if yk.get(okey) is not None:
                     kin[yr_int][okey] = yk[okey]
-            # Unificar TODOS los modelos presentes en C++ (m1_map, m1_kmixto, m0_map, iso_null) con la misma definición homóloga
+            # Unificar todos los modelos presentes en C++ con la misma definición homóloga
             for mk, _ in kin_models:
                 if mk in yk and isinstance(yk[mk], dict):
-                    for fld in ("p50", "p90", "p95", "angle", "rmse_front_km", "angular_error_deg", "adult_p95_km_aux"):
+                    for fld in (
+                        "p50",
+                        "p90",
+                        "p95",
+                        "angle",
+                        "rmse_front_km",
+                        "angular_error_deg",
+                        "adult_p95_km_aux",
+                    ):
                         if fld in yk[mk] and yk[mk][fld] is not None:
                             kin[yr_int][mk][fld] = yk[mk][fld]
-        print("✔ Cinemática homóloga de simulación C++ acoplada de forma uniforme para todos los modelos.")
+        print(
+            "✔ Cinemática homóloga de simulación C++ acoplada de forma uniforme para todos los modelos."
+        )
 
     results["kinematics"] = kin
 
@@ -446,7 +476,10 @@ def main():
         else:
             for m_key, col in models.items():
                 p_b = sub_b[col].values
-                b_dict[m_key] = {"brier": float(brier_score_loss(y_b, p_b)), "auc": None}
+                b_dict[m_key] = {
+                    "brier": float(brier_score_loss(y_b, p_b)),
+                    "auc": None,
+                }
         eco_res[int(block_id)] = b_dict
 
     results["ecoregions"] = eco_res
@@ -481,7 +514,9 @@ def main():
     y_unseen_pos = unseen_pos_df["y_observed"].values
     brier_unseen = {}
     auc_unseen = {}
-    print(f"Bloques Nuevos (No vistos, N_pos={y_unseen.sum()}, bloques con presencias={unseen_blocks_with_pos}):")
+    print(
+        f"Bloques Nuevos (No vistos, N_pos={y_unseen.sum()}, bloques con presencias={unseen_blocks_with_pos}):"
+    )
     for m_key, col in models.items():
         p_u = unseen_df[col].values
         b_u = float(brier_score_loss(y_unseen, p_u))
@@ -493,7 +528,9 @@ def main():
         brier_unseen[m_key] = b_u
         auc_unseen[m_key] = auc_u
         auc_str = f"{auc_u:.4f}" if auc_u is not None else "null"
-        print(f"  [{m_key:10s}] Brier: {b_u:.5f} | AUC (bloques con presencias): {auc_str}")
+        print(
+            f"  [{m_key:10s}] Brier: {b_u:.5f} | AUC (bloques con presencias): {auc_str}"
+        )
 
     results["thermal_persistence"]["brier_seen"] = brier_seen
     results["thermal_persistence"]["auc_seen"] = auc_seen
@@ -520,8 +557,12 @@ def main():
             raise RuntimeError(
                 f"Observados inconsistentes con prevalence_scaling.json en {yr}: CSV={obs_sum} vs JSON={expected_obs}"
             )
-        r5, rm, r95 = (float(np.percentile(raw_t[:, k], q, method="linear")) for q in (5, 50, 95))
-        a5, am, a95 = (float(np.percentile(adj_t[:, k], q, method="linear")) for q in (5, 50, 95))
+        r5, rm, r95 = (
+            float(np.percentile(raw_t[:, k], q, method="linear")) for q in (5, 50, 95)
+        )
+        a5, am, a95 = (
+            float(np.percentile(adj_t[:, k], q, method="linear")) for q in (5, 50, 95)
+        )
         pit_k = float(np.mean(raw_t[:, k] <= obs_sum))
         pit_vals.append(pit_k)
         yearly_cov[yr] = {
@@ -539,7 +580,8 @@ def main():
             "m1_map_adj": float(prev["evaluation"]["m1_map"]["adj"][k]),
         }
         print(
-            f"Año {yr}: Obs={obs_sum:4d} | crudo P5-P95: [{r5:6.1f}, {r95:6.1f}] ({yearly_cov[yr]['in_90_pi']}, PIT={pit_k:.3f}) | "
+            f"Año {yr}: Obs={obs_sum:4d} | "
+            f"crudo P5-P95: [{r5:6.1f}, {r95:6.1f}] ({yearly_cov[yr]['in_90_pi']}, PIT={pit_k:.3f}) | "
             f"ajustado P5-P95: [{a5:6.1f}, {a95:6.1f}] ({yearly_cov[yr]['adj_in_90_pi']})"
         )
     p5 = df["p_m1_p5"].values
@@ -566,8 +608,12 @@ def main():
             "m1_map": prev["calibration"]["m1_map"],
             "m0_map": prev["calibration"]["m0_map"],
             "ensemble_delta_median": float(np.median(prev["ensemble"]["delta"])),
-            "ensemble_delta_p5": float(np.percentile(prev["ensemble"]["delta"], 5, method="linear")),
-            "ensemble_delta_p95": float(np.percentile(prev["ensemble"]["delta"], 95, method="linear")),
+            "ensemble_delta_p5": float(
+                np.percentile(prev["ensemble"]["delta"], 5, method="linear")
+            ),
+            "ensemble_delta_p95": float(
+                np.percentile(prev["ensemble"]["delta"], 95, method="linear")
+            ),
             "ensemble_calib_raw_median": float(
                 np.median(prev["ensemble"]["calib_raw_expected"])
             ),

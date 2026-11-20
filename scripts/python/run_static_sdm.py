@@ -63,7 +63,8 @@ def map_thermal(df, years):
 
     if "effort_exogenous" not in df.columns:
         raise RuntimeError(
-            "Falta la columna obligatoria 'effort_exogenous' en el CSV (prohibido fallback circular a 'effort_araneae')."
+            "Falta la columna obligatoria 'effort_exogenous' en el CSV "
+            "(prohibido fallback circular a 'effort_araneae')."
         )
     df["w_tmin"] = w_arr
     df["s_tmean"] = s_arr
