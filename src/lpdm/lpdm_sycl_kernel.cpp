@@ -234,6 +234,7 @@ public:
     }
 
     [[nodiscard]] EngineTelemetry telemetry() const override { return tel_; }
+    void reset_telemetry() override { tel_ = EngineTelemetry{}; }
     [[nodiscard]] bool is_gpu_offload_active() const noexcept override { return is_gpu_; }
     [[nodiscard]] std::string device_description() const override { return device_desc_; }
 

@@ -62,6 +62,7 @@ constexpr int    kLpdmSteps = 480;         // 480 pasos x 60 s = 8.0 h máximas 
 constexpr float  kLpdmDt = 60.0f;
 constexpr double kEnvelopeBaseKm = 50.0;
 constexpr double kTailKm = 300.0;          // cola de larga distancia (saltos satelitales mediados por humanos)
+constexpr float  kHomologousFrontProbThreshold = 0.001f; // umbral calibrado sobre E[Y_{i,t}] = psi_{i,t} * p_{i,t} (frente homólogo)
 
 /// Geometría UNIFICADA del polígono semilla (idéntica a la de calibración): centroide y radio para P50/P90/P95,
 /// envolvente y azimut. Sustituye al antiguo punto kEpiLat/kEpiLon (M15).
@@ -87,11 +88,27 @@ std::string jnum(double v) {
     return os.str();
 }
 
+/// Percentil con interpolación lineal idéntica a numpy.percentile(..., method="linear")
 double percentile(std::vector<double>& v, double p) {
     if (v.empty()) return 0.0;
     std::sort(v.begin(), v.end());
-    size_t idx = static_cast<size_t>(p * static_cast<double>(v.size() - 1));
-    return v[std::min(idx, v.size() - 1)];
+    if (v.size() == 1) return v[0];
+    const double pos = std::clamp(p, 0.0, 1.0) * static_cast<double>(v.size() - 1);
+    const size_t lo = static_cast<size_t>(std::floor(pos));
+    const size_t hi = static_cast<size_t>(std::ceil(pos));
+    const double frac = pos - static_cast<double>(lo);
+    return v[lo] + frac * (v[hi] - v[lo]);
+}
+
+float percentile_f(std::vector<float>& v, double p) {
+    if (v.empty()) return 0.0f;
+    std::sort(v.begin(), v.end());
+    if (v.size() == 1) return v[0];
+    const double pos = std::clamp(p, 0.0, 1.0) * static_cast<double>(v.size() - 1);
+    const size_t lo = static_cast<size_t>(std::floor(pos));
+    const size_t hi = static_cast<size_t>(std::ceil(pos));
+    const double frac = pos - static_cast<double>(lo);
+    return static_cast<float>(static_cast<double>(v[lo]) + frac * static_cast<double>(v[hi] - v[lo]));
 }
 
 struct EvalRow {
@@ -150,7 +167,11 @@ std::vector<EvalRow> load_eval_dataset(const std::string& csv_path, const joro::
     const int c_zi = find_col({"z_imp"}), c_zb = find_col({"z_borde"}), c_zd = find_col({"z_dosel"});
     const int c_h = find_col({"pop_density_h"}), c_r = find_col({"road_density_r"}), c_eco = find_col({"ecoregion_block"});
     const int c_cpue = find_col({"cpue_joro"}), c_cum = find_col({"y_cumulative_obs"}), c_tau = find_col({"tau_invasion_age"});
-    if (c_cell < 0 || c_year < 0 || c_y < 0 || (c_eex < 0 && c_eff < 0) || c_lon < 0 || c_lat < 0) {
+    if (c_eex < 0) {
+        throw std::runtime_error("Falta la columna obligatoria 'effort_exogenous' en " + csv_path +
+                                 " (prohibido fallback circular a 'effort_araneae').");
+    }
+    if (c_cell < 0 || c_year < 0 || c_y < 0 || c_lon < 0 || c_lat < 0) {
         std::cerr << "ERROR: cabecera inesperada en " << csv_path << "\n";
         return rows;
     }
@@ -169,7 +190,7 @@ std::vector<EvalRow> load_eval_dataset(const std::string& csv_path, const joro::
         r.y_detected = static_cast<uint8_t>(get(c_y, 0));
         r.joro_count = static_cast<int32_t>(get(c_cnt, 0));
         r.effort_araneae = static_cast<int32_t>(get(c_eff, 0));
-        r.effort_exogenous = c_eex >= 0 ? static_cast<int32_t>(get(c_eex, 0)) : r.effort_araneae;
+        r.effort_exogenous = static_cast<int32_t>(get(c_eex, 0));
         r.cpue_joro = static_cast<float>(get(c_cpue, 0));
         r.y_cumulative = static_cast<uint8_t>(get(c_cum, r.y_detected));
         r.tau_invasion_age = static_cast<float>(get(c_tau, 0));
@@ -295,25 +316,36 @@ std::vector<std::vector<float>> load_ensemble_thetas(const std::string& csv_path
     return ensemble;
 }
 
-/// Lee `"map_theta": [...]` desde `calibration_summary_M{1,0}.json` (con respaldo al vector por defecto).
-std::vector<float> load_map_theta_from_json(const std::string& json_path, const std::vector<float>& fallback) {
+/// Lee `"map_theta": [...]` desde `calibration_summary_M{1,0}.json`; lanza std::runtime_error si falta o es inválido.
+std::vector<float> load_map_theta_from_json(const std::string& json_path, size_t expected_size) {
     std::ifstream f(json_path);
-    if (!f.is_open()) return fallback;
+    if (!f.is_open()) {
+        throw std::runtime_error("Falta el archivo de checkpoint obligatorio: " + json_path);
+    }
     std::ostringstream ss;
     ss << f.rdbuf();
     const std::string txt = ss.str();
     const size_t key = txt.find("\"map_theta\"");
-    if (key == std::string::npos) return fallback;
+    if (key == std::string::npos) {
+        throw std::runtime_error("Falta la clave '\"map_theta\"' en " + json_path);
+    }
     const size_t lb = txt.find('[', key);
     const size_t rb = (lb != std::string::npos) ? txt.find(']', lb) : std::string::npos;
-    if (lb == std::string::npos || rb == std::string::npos || rb <= lb) return fallback;
+    if (lb == std::string::npos || rb == std::string::npos || rb <= lb) {
+        throw std::runtime_error("Formato inválido de 'map_theta' en " + json_path);
+    }
     std::vector<float> out;
     std::stringstream vs(txt.substr(lb + 1, rb - lb - 1));
     std::string tok;
     while (std::getline(vs, tok, ',')) {
-        try { out.push_back(std::stof(tok)); } catch (...) { return fallback; }
+        out.push_back(std::stof(tok));
     }
-    return (out.size() == fallback.size()) ? out : fallback;
+    if (out.size() != expected_size) {
+        throw std::runtime_error("Dimensión inesperada de 'map_theta' en " + json_path +
+                                 " (esperados " + std::to_string(expected_size) + ", leídos " +
+                                 std::to_string(out.size()) + ")");
+    }
+    return out;
 }
 
 
@@ -360,6 +392,7 @@ struct SimOutputs {
     std::vector<float> p_marginal_calib;       ///< predicción en las filas de calibración 2014–2019 (offset de prevalencia)
     std::vector<float> p_marginal_calib_nofest;///< predicción en 2014–2019 sin f_est (offset estacionario de Platt, H3b)
     std::vector<double> sim_front_p50, sim_front_p90, sim_front_p95;
+    std::vector<double> sim_adult_front_p95;   ///< diagnóstico auxiliar separado: P95 de adultas crudas (count > 2.0)
     std::vector<double> sim_mean_angle_deg;
     std::vector<std::array<double, 4>> sim_quadrant_p95;   ///< [año][NE,SE,SW,NW]
     std::vector<double> env_radius_km;         ///< envolvente SIMULADA acumulada por año (base + frente simulado acumulado)
@@ -385,6 +418,7 @@ public:
         out.sim_front_p50.assign(kTotalYears, 0.0);
         out.sim_front_p90.assign(kTotalYears, 0.0);
         out.sim_front_p95.assign(kTotalYears, 0.0);
+        out.sim_adult_front_p95.assign(kTotalYears, 0.0);
         out.sim_mean_angle_deg.assign(kTotalYears, 0.0);
         out.sim_quadrant_p95.assign(kTotalYears, {std::nan(""), std::nan(""), std::nan(""), std::nan("")});
         out.env_radius_km.assign(kTotalYears, kEnvelopeBaseKm);
@@ -500,47 +534,18 @@ public:
             }
         }
 
-        // 5. Métricas del frente (distancias y azimut respecto del centroide semilla; P95 por cuadrante)
-        std::vector<double> distances;
-        std::array<std::vector<double>, 4> quad_d;
-        double sum_sin = 0.0, sum_cos = 0.0;
-        size_t n_angle_cells = 0;
-        for (const auto& [cid, count] : fall.adult_density_per_cell) {
-            if (count > 2.0f) {
-                const int32_t pos = ctx_.cidx->find(cid);
-                if (pos >= 0) {
-                    const auto& gc = grid[static_cast<size_t>(pos)];
-                    const double d = ctx_.cell_seed_dist_km[static_cast<size_t>(pos)];
-                    distances.push_back(d);
-                    const double az = azimuth_from_epicenter_deg(gc.centroid_lat, gc.centroid_lon);
-                    quad_d[static_cast<size_t>(quadrant_of(az))].push_back(d);
-                    if (d > g_seed.radius_km) {
-                        const double rad = az * M_PI / 180.0;
-                        sum_sin += std::sin(rad);
-                        sum_cos += std::cos(rad);
-                        ++n_angle_cells;
-                    }
+        // 5. Diagnóstico auxiliar separado: frente biológico crudo de adultas (count > 2.0f)
+        {
+            std::vector<double> adult_distances;
+            for (const auto& [cid, count] : fall.adult_density_per_cell) {
+                if (count > 2.0f) {
+                    const int32_t pos = ctx_.cidx->find(cid);
+                    if (pos >= 0) adult_distances.push_back(ctx_.cell_seed_dist_km[static_cast<size_t>(pos)]);
                 }
             }
+            out.sim_adult_front_p95[static_cast<size_t>(yi)] =
+                adult_distances.empty() ? 5.0 : percentile(adult_distances, 0.95);
         }
-        if (!distances.empty()) {
-            out.sim_front_p50[static_cast<size_t>(yi)] = percentile(distances, 0.50);
-            out.sim_front_p90[static_cast<size_t>(yi)] = percentile(distances, 0.90);
-            out.sim_front_p95[static_cast<size_t>(yi)] = percentile(distances, 0.95);
-            if (n_angle_cells > 0) {
-                double mean_deg = std::atan2(sum_sin, sum_cos) * 180.0 / M_PI;
-                if (mean_deg < 0.0) mean_deg += 360.0;
-                out.sim_mean_angle_deg[static_cast<size_t>(yi)] = mean_deg;
-            } else {
-                out.sim_mean_angle_deg[static_cast<size_t>(yi)] = std::numeric_limits<double>::quiet_NaN();
-            }
-            for (size_t q = 0; q < 4; ++q) if (!quad_d[q].empty()) out.sim_quadrant_p95[static_cast<size_t>(yi)][q] = percentile(quad_d[q], 0.95);
-        } else {
-            out.sim_front_p50[static_cast<size_t>(yi)] = out.sim_front_p90[static_cast<size_t>(yi)] = out.sim_front_p95[static_cast<size_t>(yi)] = 5.0;
-            out.sim_mean_angle_deg[static_cast<size_t>(yi)] = std::numeric_limits<double>::quiet_NaN();
-        }
-        cummax_front_ = std::max(cummax_front_, out.sim_front_p95[static_cast<size_t>(yi)]);
-        out.env_radius_km[static_cast<size_t>(yi)] = kEnvelopeBaseKm + cummax_front_;   // envolvente SIMULADA (M15)
 
         // 6. Llenar arreglos densos A_{i,t}, N_{i,t}
         for (const auto& [cid, cnt] : aero_map) {
@@ -564,18 +569,43 @@ public:
             psi_[i] = joro::inference::update_dynamic_occupancy(psi_[i], gamma, phi);
         }
 
-        // 8. Predicciones sobre las filas de calibración (offset de prevalencia) y de evaluación
+        // 8. Predicciones sobre las filas de calibración (offset de prevalencia) y de evaluación + Frente HOMÓLOGO sobre E[Y_{i,t}] = psi_{i,t} * p_{i,t}
+        std::vector<double> distances;
+        std::vector<double> fallback_distances;
+        std::array<std::vector<double>, 4> quad_d;
+        double sum_sin = 0.0, sum_cos = 0.0;
+        size_t n_angle_cells = 0;
+        auto accumulate_homologous_front = [&](float pm, double d, double az, bool pass_threshold) {
+            if (pass_threshold ? (pm > kHomologousFrontProbThreshold) : (pm > 0.0f)) {
+                distances.push_back(d);
+                quad_d[static_cast<size_t>(quadrant_of(az))].push_back(d);
+                if (d > g_seed.radius_km) {
+                    const double rad = az * M_PI / 180.0;
+                    sum_sin += std::sin(rad);
+                    sum_cos += std::cos(rad);
+                    ++n_angle_cells;
+                }
+            }
+        };
+
         if (yr < kEvalStartYear) {
             for (size_t r : (*ctx_.calib_rows_of_year)[static_cast<size_t>(yi)]) {
-                const int32_t pos = ctx_.cidx->find((*ctx_.calib_rows)[r].cell_id);
+                const auto& row = (*ctx_.calib_rows)[r];
+                const int32_t pos = ctx_.cidx->find(row.cell_id);
                 if (pos >= 0) {
                     const float psi_cell = psi_[static_cast<size_t>(pos)];
-                    out.p_marginal_calib[r] = joro::inference::marginal_observation_prob(psi_cell,
-                                                                                         (*ctx_.calib_rows)[r].p_det);
+                    const float pm = joro::inference::marginal_observation_prob(psi_cell, row.p_det);
+                    out.p_marginal_calib[r] = pm;
                     if (spec.diagnostics) {
-                        out.p_marginal_calib_nofest[r] = joro::inference::marginal_observation_prob(psi_cell,
-                                                                                                    (*ctx_.calib_rows)[r].p_det_nofest);
+                        out.p_marginal_calib_nofest[r] = joro::inference::marginal_observation_prob(psi_cell, row.p_det_nofest);
                     }
+                    accumulate_homologous_front(pm, row.dist_epi_km, row.angle_epi_deg, true);
+                }
+            }
+            if (distances.empty()) {
+                for (size_t r : (*ctx_.calib_rows_of_year)[static_cast<size_t>(yi)]) {
+                    const auto& row = (*ctx_.calib_rows)[r];
+                    accumulate_homologous_front(out.p_marginal_calib[r], row.dist_epi_km, row.angle_epi_deg, false);
                 }
             }
         } else {
@@ -597,7 +627,38 @@ public:
                     out.k_eval[row_idx] = joro::abm::compute_carrying_capacity(grid[i], cc);
                 }
             }
+            for (const auto& [cid, row_idx] : y_eval_map) {
+                (void)cid;
+                const EvalRow& row = (*ctx_.eval_rows)[row_idx];
+                accumulate_homologous_front(out.p_marginal_eval[row_idx], row.dist_epi_km, row.angle_epi_deg, true);
+            }
+            if (distances.empty()) {
+                for (const auto& [cid, row_idx] : y_eval_map) {
+                    (void)cid;
+                    const EvalRow& row = (*ctx_.eval_rows)[row_idx];
+                    accumulate_homologous_front(out.p_marginal_eval[row_idx], row.dist_epi_km, row.angle_epi_deg, false);
+                }
+            }
         }
+
+        if (!distances.empty()) {
+            out.sim_front_p50[static_cast<size_t>(yi)] = percentile(distances, 0.50);
+            out.sim_front_p90[static_cast<size_t>(yi)] = percentile(distances, 0.90);
+            out.sim_front_p95[static_cast<size_t>(yi)] = percentile(distances, 0.95);
+            if (n_angle_cells > 0) {
+                double mean_deg = std::atan2(sum_sin, sum_cos) * 180.0 / M_PI;
+                if (mean_deg < 0.0) mean_deg += 360.0;
+                out.sim_mean_angle_deg[static_cast<size_t>(yi)] = mean_deg;
+            } else {
+                out.sim_mean_angle_deg[static_cast<size_t>(yi)] = std::numeric_limits<double>::quiet_NaN();
+            }
+            for (size_t q = 0; q < 4; ++q) if (!quad_d[q].empty()) out.sim_quadrant_p95[static_cast<size_t>(yi)][q] = percentile(quad_d[q], 0.95);
+        } else {
+            out.sim_front_p50[static_cast<size_t>(yi)] = out.sim_front_p90[static_cast<size_t>(yi)] = out.sim_front_p95[static_cast<size_t>(yi)] = 5.0;
+            out.sim_mean_angle_deg[static_cast<size_t>(yi)] = std::numeric_limits<double>::quiet_NaN();
+        }
+        cummax_front_ = std::max(cummax_front_, out.sim_front_p95[static_cast<size_t>(yi)]);
+        out.env_radius_km[static_cast<size_t>(yi)] = kEnvelopeBaseKm + cummax_front_;   // envolvente SIMULADA (M15)
 
         // 9. Limpieza dispersa
         for (int32_t cid : touched_) { arr_[cid] = 0; arr_h_[cid] = 0; adult_[cid] = 0.0f; dsum_[cid] = 0.0f; dcnt_[cid] = 0; }
@@ -862,14 +923,10 @@ int main(int argc, char* argv[]) {
         if (m1_ensemble.size() > cap) { m1_ensemble.resize(cap); std::cout << "  (JORO_EVAL_MAX_MEMBERS=" << cap << ": ensamble M1 truncado)\n"; }
     }
 
-    // Parámetros MAP congelados de M1 y M0 (leídos directamente de calibration_summary_M{1,0}.json con respaldo)
+    // Parámetros MAP congelados de M1 y M0 (leídos obligatoriamente de calibration_summary_M{1,0}.json; sin fallback codificado)
     const std::string ckpt_dir = joro::env_or("JORO_CHECKPOINT_DIR", "/mnt/hpc_scratch/joro-hpc/checkpoints/");
-    const std::vector<float> theta_m1_map = load_map_theta_from_json(
-        ckpt_dir + "calibration_summary_M1.json",
-        {-2.1747344f, 0.028961826f, 2.0f, 9203.6211f, 0.79627186f, 0.4722499f, 0.35181648f, -1.3290558f, 1.7328026f});
-    const std::vector<float> theta_m0_map = load_map_theta_from_json(
-        ckpt_dir + "calibration_summary_M0.json",
-        {-0.6067552f, 0.091027737f, 1.0f, 11776.741f, 0.29459813f, 0.50126952f, -1.0f, 2.1409147f});
+    const std::vector<float> theta_m1_map = load_map_theta_from_json(ckpt_dir + "calibration_summary_M1.json", 9);
+    const std::vector<float> theta_m0_map = load_map_theta_from_json(ckpt_dir + "calibration_summary_M0.json", 8);
 
     // Kernel gravitacional humano: atracción del receptor w_i = H_i R_i y emisión ponderada por R_j
     joro::inference::HumanTransportKernel human_kernel;
@@ -1001,11 +1058,9 @@ int main(int argc, char* argv[]) {
     #pragma omp parallel for schedule(static)
     for (size_t r = 0; r < eval_rows.size(); ++r) {
         auto row_vals = m1_ensemble_preds[r];
-        std::sort(row_vals.begin(), row_vals.end());
-        size_t n = row_vals.size();
-        m1_p5[r] = row_vals[static_cast<size_t>(0.05 * (n - 1))];
-        m1_median[r] = row_vals[static_cast<size_t>(0.50 * (n - 1))];
-        m1_p95[r] = row_vals[static_cast<size_t>(0.95 * (n - 1))];
+        m1_p5[r] = percentile_f(row_vals, 0.05);
+        m1_median[r] = percentile_f(row_vals, 0.50);
+        m1_p95[r] = percentile_f(row_vals, 0.95);
     }
 
     // 8.b Offset de prevalencia (solo con datos 2014–2019) para M1 MAP y M0 MAP
@@ -1035,12 +1090,22 @@ int main(int argc, char* argv[]) {
         } else {
             std::string line;
             std::getline(sdm_f, line); // header
+            int p_sdm_col = 7;
+            {
+                std::stringstream hs(line);
+                std::string h;
+                int idx = 0;
+                while (std::getline(hs, h, ',')) {
+                    while (!h.empty() && (h.back() == '\r' || h.back() == ' ')) h.pop_back();
+                    if (h == "p_sdm") p_sdm_col = idx;
+                    ++idx;
+                }
+            }
             size_t r_count = 0;
             while (std::getline(sdm_f, line) && r_count < eval_rows.size()) {
                 std::stringstream ss(line);
                 std::string tok;
-                for (int col = 0; col < 7; ++col) std::getline(ss, tok, ',');
-                std::getline(ss, tok, ','); // p_sdm
+                for (int col = 0; col <= p_sdm_col; ++col) std::getline(ss, tok, ',');
                 if (!tok.empty()) sdm_preds[r_count++] = std::stof(tok);
             }
             std::cout << "✔ " << r_count << " predicciones SDM cargadas exitosamente.\n";
@@ -1148,7 +1213,7 @@ int main(int argc, char* argv[]) {
             pairs.emplace_back(p[i], rows[i].y_detected);
             if (rows[i].y_detected == 1) n_pos++; else n_neg++;
         }
-        if (n_pos == 0 || n_neg == 0) return 0.5;
+        if (n_pos == 0 || n_neg == 0) return std::numeric_limits<double>::quiet_NaN();
 
         std::sort(pairs.begin(), pairs.end(), [](const auto& a, const auto& b) {
             return a.first < b.first;
@@ -1261,13 +1326,28 @@ int main(int argc, char* argv[]) {
         return (fp + tn) > 0 ? (static_cast<double>(fp) / (fp + tn)) : 0.0;
     };
 
-    // Cobertura empírica de incertidumbre (P5-P95)
-    uint64_t cov_hits = 0;
-    for (size_t i = 0; i < eval_rows.size(); ++i) {
-        float y = static_cast<float>(eval_rows[i].y_detected);
-        if (y >= m1_p5[i] && y <= m1_p95[i]) cov_hits++;
+    // Calibración sobre totales anuales 2020-2024 y PIT (Probability Integral Transform) en lugar de cobertura binaria degenerada por celda
+    int annual_total_cov_hits = 0;
+    double annual_pit_sum = 0.0;
+    std::array<double, kEvalYears> annual_pit_by_year{};
+    for (int k = 0; k < kEvalYears; ++k) {
+        const int yr = kEvalStartYear + k;
+        const double obs_tot = static_cast<double>(obs_stats[yr].presences);
+        std::vector<double> mem_tots(member_raw_tot.size());
+        size_t le_cnt = 0;
+        for (size_t m = 0; m < member_raw_tot.size(); ++m) {
+            mem_tots[m] = member_raw_tot[m][static_cast<size_t>(k)];
+            if (mem_tots[m] <= obs_tot) ++le_cnt;
+        }
+        const double p5_tot = percentile(mem_tots, 0.05);
+        const double p95_tot = percentile(mem_tots, 0.95);
+        if (obs_tot >= p5_tot && obs_tot <= p95_tot) ++annual_total_cov_hits;
+        const double pit_k = !mem_tots.empty() ? static_cast<double>(le_cnt) / static_cast<double>(mem_tots.size()) : 0.5;
+        annual_pit_by_year[static_cast<size_t>(k)] = pit_k;
+        annual_pit_sum += pit_k;
     }
-    double empirical_coverage = static_cast<double>(cov_hits) / eval_rows.size();
+    const double annual_total_coverage_pct = 100.0 * static_cast<double>(annual_total_cov_hits) / static_cast<double>(kEvalYears);
+    const double annual_total_mean_pit = annual_pit_sum / static_cast<double>(kEvalYears);
 
     // ─────────────────────────────────────────────────────────────────────────
     // TABLA 1: DESEMPEÑO PROBABILÍSTICO GLOBAL FUERA DE MUESTRA (2020–2024)
@@ -1417,13 +1497,16 @@ int main(int argc, char* argv[]) {
     // ─────────────────────────────────────────────────────────────────────────
     // TABLA 5: CUANTIFICACIÓN Y COBERTURA DE INCERTIDUMBRE
     // ─────────────────────────────────────────────────────────────────────────
-    std::cout << "\nTABLA 5: PROPAGACIÓN DE INCERTIDUMBRE (ENSAMBLE COMPATIBLE Theta_comp, 277 MIEMBROS):\n";
+    std::cout << "\nTABLA 5: PROPAGACIÓN DE INCERTIDUMBRE (ENSAMBLE COMPATIBLE Theta_comp, "
+              << m1_ensemble.size() << " MIEMBROS):\n";
     std::cout << "┌──────────────────────────────────────────────┬──────────────────────────┬────────────────────────┐\n";
     std::cout << "│ Métrica de Incertidumbre                     │ Valor Obtenido           │ Diagnóstico            │\n";
     std::cout << "├──────────────────────────────────────────────┼──────────────────────────┼────────────────────────┤\n";
     std::cout << "│ Miembros de Theta_comp evaluados             │ " << std::setw(24) << m1_ensemble.size() << " │ 100% propagado         │\n";
-    std::cout << "│ Cobertura empírica del intervalo P5–P95 (%)  │ " << std::setw(23) << std::fixed << std::setprecision(2)
-              << (empirical_coverage * 100.0) << "% │ Nominal 90.0%          │\n";
+    std::cout << "│ Cobertura totales anuales P5–P95 (2020–2024) │ " << std::setw(18) << annual_total_cov_hits << "/5 ("
+              << std::fixed << std::setprecision(0) << annual_total_coverage_pct << "%) │ Nominal 90.0%          │\n";
+    std::cout << "│ PIT medio sobre totales anuales (2020–2024)  │ " << std::setw(24) << std::setprecision(4)
+              << annual_total_mean_pit << " │ Ideal 0.5000           │\n";
     std::cout << "│ Ancho medio de banda P95 - P5                │ " << std::setw(24) << std::setprecision(5)
               << (std::accumulate(m1_p95.begin(), m1_p95.end(), 0.0) / m1_p95.size() -
                   std::accumulate(m1_p5.begin(), m1_p5.end(), 0.0) / m1_p5.size()) << " │ Calibración bien acot. │\n";
@@ -1602,33 +1685,54 @@ int main(int argc, char* argv[]) {
         std::cout << "✔ Diagnósticos de hipótesis exportados a " << out_dir << "hypothesis_diagnostics.json\n";
     }
 
-    // Guardar resumen JSON de cinemática de frente
+    // Guardar resumen JSON de cinemática de frente (frente primario homólogo sobre E[Y_{i,t}] = psi*p_det > kHomologousFrontProbThreshold,
+    // más diagnóstico auxiliar separado adult_p95_km sobre adultas crudas > 2.0)
     const std::string kin_json_path = out_dir + "validation_sim_kinematics.json";
     {
         std::ofstream kj(kin_json_path);
         kj << "{\n";
         for (int yr = 2020; yr <= 2024; ++yr) {
             int yi = yr - 2014;
+            double o_p50 = obs_stats[yr].p50_km;
+            double o_p90 = obs_stats[yr].p90_km;
             double o_p95 = obs_stats[yr].p95_km;
-            double m1_p95_val = m1_map_out.sim_front_p95[yi];
-            double iso_p95_val = iso_null_out.sim_front_p95[yi];
             double o_ang = obs_stats[yr].mean_angle_deg;
-            double m1_ang = m1_map_out.sim_mean_angle_deg[yi];
-            double iso_ang = iso_null_out.sim_mean_angle_deg[yi];
-            double ang_err_m1 = std::abs(m1_ang - o_ang);
-            if (ang_err_m1 > 180.0) ang_err_m1 = 360.0 - ang_err_m1;
-            double ang_err_iso = std::abs(iso_ang - o_ang);
-            if (ang_err_iso > 180.0) ang_err_iso = 360.0 - ang_err_iso;
+            auto write_model_kin = [&](const char* key, const SimOutputs& so, bool comma) {
+                const double p50 = so.sim_front_p50[yi];
+                const double p90 = so.sim_front_p90[yi];
+                const double p95 = so.sim_front_p95[yi];
+                const double ang = so.sim_mean_angle_deg[yi];
+                const double rmse = std::sqrt(((p50 - o_p50) * (p50 - o_p50) +
+                                               (p90 - o_p90) * (p90 - o_p90) +
+                                               (p95 - o_p95) * (p95 - o_p95)) / 3.0);
+                double ang_err = std::abs(ang - o_ang);
+                if (ang_err > 180.0) ang_err = 360.0 - ang_err;
+                kj << "    \"" << key << "\": {\"p50\": " << jnum(p50)
+                   << ", \"p90\": " << jnum(p90)
+                   << ", \"p95\": " << jnum(p95)
+                   << ", \"angle\": " << jnum(ang)
+                   << ", \"rmse_front_km\": " << jnum(rmse)
+                   << ", \"angular_error_deg\": " << jnum(ang_err)
+                   << ", \"adult_p95_km_aux\": " << jnum(so.sim_adult_front_p95[yi]) << "}"
+                   << (comma ? ",\n" : "\n");
+            };
 
             kj << "  \"" << yr << "\": {\n"
+               << "    \"front_prob_threshold\": " << jnum(kHomologousFrontProbThreshold) << ",\n"
+               << "    \"env_radius_km\": " << jnum(m1_map_out.env_radius_km[yi]) << ",\n"
+               << "    \"obs_p50\": " << jnum(o_p50) << ",\n"
+               << "    \"obs_p90\": " << jnum(o_p90) << ",\n"
                << "    \"obs_p95\": " << jnum(o_p95) << ",\n"
-               << "    \"obs_angle\": " << jnum(o_ang) << ",\n"
-               << "    \"m1_map\": {\"p95\": " << jnum(m1_p95_val) << ", \"angle\": " << jnum(m1_ang) << ", \"angular_error_deg\": " << jnum(ang_err_m1) << "},\n"
-               << "    \"iso_null\": {\"p95\": " << jnum(iso_p95_val) << ", \"angle\": " << jnum(iso_ang) << ", \"angular_error_deg\": " << jnum(ang_err_iso) << "}\n"
-               << "  }" << (yr == 2024 ? "\n" : ",\n");
+               << "    \"obs_angle\": " << jnum(o_ang) << ",\n";
+            write_model_kin("m1_map", m1_map_out, true);
+            write_model_kin("m1_kmixto", km_out, true);
+            write_model_kin("m0_map", m0_map_out, true);
+            write_model_kin("iso_null", iso_null_out, false);
+            kj << "  }" << (yr == 2024 ? "\n" : ",\n");
         }
         kj << "}\n";
-        std::cout << "✔ Cinemática de simulación exportada a " << kin_json_path << "\n";
+        std::cout << "✔ Cinemática homóloga de simulación (umbral E[Y] > " << kHomologousFrontProbThreshold
+                  << ") exportada a " << kin_json_path << "\n";
     }
 
     // Geometría del polígono semilla (referencia angular) y escalado de prevalencia: artefactos para los informes
@@ -1636,6 +1740,12 @@ int main(int argc, char* argv[]) {
         std::ofstream sg(out_dir + "seed_geometry.json");
         sg << "{\n  \"n_seed_cells\": " << g_seed.n_cells << ",\n  \"centroid_lat\": " << jnum(g_seed.lat)
            << ",\n  \"centroid_lon\": " << jnum(g_seed.lon) << ",\n  \"radius_km\": " << jnum(g_seed.radius_km)
+           << ",\n  \"front_prob_threshold\": " << jnum(kHomologousFrontProbThreshold)
+           << ",\n  \"env_radius_km_by_year\": {";
+        for (int yr = 2020; yr <= 2024; ++yr) {
+            sg << (yr > 2020 ? ", " : "") << "\"" << yr << "\": " << jnum(m1_map_out.env_radius_km[static_cast<size_t>(yr - kStartYear)]);
+        }
+        sg << "}"
            << ",\n  \"legacy_epicenter_lat\": " << jnum(34.13816) << ",\n  \"legacy_epicenter_lon\": " << jnum(-83.75723)
            << ",\n  \"legacy_to_centroid_km\": " << jnum(dist_to_seed_km(34.13816f, -83.75723f)) << "\n}\n";
 
@@ -1697,7 +1807,10 @@ int main(int argc, char* argv[]) {
        << "  \"km1_brier_global\": " << calc_brier_global(km_out.p_marginal_eval, eval_rows) << ",\n"
        << "  \"km1_auc\": " << calc_auc(km_out.p_marginal_eval, eval_rows) << ",\n"
        << "  \"iso_lambda_calibrated_km\": " << best_lambda_km << ",\n"
-       << "  \"empirical_coverage_pct\": " << (empirical_coverage * 100.0) << ",\n"
+       << "  \"front_prob_threshold\": " << kHomologousFrontProbThreshold << ",\n"
+       << "  \"annual_total_coverage_years\": " << annual_total_cov_hits << ",\n"
+       << "  \"annual_total_coverage_pct\": " << annual_total_coverage_pct << ",\n"
+       << "  \"annual_total_mean_pit\": " << annual_total_mean_pit << ",\n"
        << "  \"fpr_north_m1\": " << fpr_m1 << ",\n"
        << "  \"fpr_north_sdm\": " << fpr_sdm << ",\n"
        << "  \"ensemble_members\": " << m1_ensemble.size() << ",\n"

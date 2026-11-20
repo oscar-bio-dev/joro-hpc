@@ -72,6 +72,7 @@ constexpr int    kNYears = 6;              // 2014..2019 (la ventana 2020-2024 N
 constexpr int    kLpdmSteps = 480;         // 480 pasos x 60 s = 8.0 h máximas de vuelo diurno por episodio (M1)
 constexpr float  kLpdmDt = 60.0f;
 constexpr double kEnvelopeBaseKm = 50.0;   // Alcance potencial base alrededor del frente observado
+constexpr float  kHomologousFrontProbThreshold = 0.001f; // Umbral homólogo sobre E[Y_{i,t}] = psi_{i,t} * p_{i,t}
 
 ChainTelemetry operator-(const ChainTelemetry& a, const ChainTelemetry& b) {
     ChainTelemetry d;
@@ -93,9 +94,31 @@ double elapsed_s(std::chrono::steady_clock::time_point t0) {
     return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
 }
 
-double percentile95(std::vector<double>& v) {
+/// Percentil con interpolación lineal idéntica a numpy.percentile(..., method="linear")
+double percentile_linear(std::vector<double>& v, double p) {
+    if (v.empty()) return 0.0;
     std::sort(v.begin(), v.end());
-    return v[static_cast<size_t>(0.95 * static_cast<double>(v.size() - 1))];
+    if (v.size() == 1) return v[0];
+    const double pos = std::clamp(p, 0.0, 1.0) * static_cast<double>(v.size() - 1);
+    const size_t lo = static_cast<size_t>(std::floor(pos));
+    const size_t hi = static_cast<size_t>(std::ceil(pos));
+    const double frac = pos - static_cast<double>(lo);
+    return v[lo] + frac * (v[hi] - v[lo]);
+}
+
+float percentile_linear_f(std::vector<float>& v, double p) {
+    if (v.empty()) return 0.0f;
+    std::sort(v.begin(), v.end());
+    if (v.size() == 1) return v[0];
+    const double pos = std::clamp(p, 0.0, 1.0) * static_cast<double>(v.size() - 1);
+    const size_t lo = static_cast<size_t>(std::floor(pos));
+    const size_t hi = static_cast<size_t>(std::ceil(pos));
+    const double frac = pos - static_cast<double>(lo);
+    return static_cast<float>(static_cast<double>(v[lo]) + frac * static_cast<double>(v[hi] - v[lo]));
+}
+
+double percentile95(std::vector<double>& v) {
+    return percentile_linear(v, 0.95);
 }
 
 // Categorías de cada fila celda-año para el Brier estratificado. CAT_ARR_NEG es CANDIDATA (Y_{t-1}=0, Y_t=0): solo
@@ -429,23 +452,8 @@ CostComponents evaluate_candidate(
         auto fall = abm.step_summer_autumn_phenology(grid, th, year);
         ctx.tel.abm_time_s += elapsed_s(t_abm0);
 
-        // ── Frente simulado: P95 de la distancia al centroide semilla de las celdas con N > 2 ──
-        const auto t_cost0 = std::chrono::steady_clock::now();
-        std::vector<double> distances;
-        distances.reserve(fall.adult_density_per_cell.size());
-        for (const auto& [cell_id, count] : fall.adult_density_per_cell) {
-            if (count > 2.0f) {
-                const int32_t pos = ctx.cidx->find(cell_id);
-                if (pos >= 0) distances.push_back(ctx.epi_dist_km[static_cast<size_t>(pos)]);
-            }
-        }
-        const double front_p95 = distances.empty() ? 5.0 : percentile95(distances);
-        sim_front_per_year.push_back(front_p95);
-        cummax_sim_front = std::max(cummax_sim_front, front_p95);
-        // Envolvente activa SIMULADA (misma regla que joro_evaluate): radio = base + frente simulado acumulado (M15)
-        const float env_radius = static_cast<float>(kEnvelopeBaseKm + cummax_sim_front);
-
         // ── Volcado disperso a arreglos densos A_{i,t}, N_{i,t} ──
+        const auto t_cost0 = std::chrono::steady_clock::now();
         for (const auto& [cid, cnt] : aero_map) {
             if (cid >= 0 && static_cast<size_t>(cid) < ctx.arr.size()) { ctx.arr[cid] = cnt; ctx.touched.push_back(cid); }
         }
@@ -456,30 +464,49 @@ CostComponents evaluate_candidate(
             if (cid >= 0 && static_cast<size_t>(cid) < ctx.adult.size()) { ctx.adult[cid] = n; ctx.touched.push_back(cid); }
         }
 
-        // ── Ocupación latente (cloglog), detección TGB y Brier estratificado (OpenMP) ──
-        double s_ap = 0.0, s_an = 0.0, s_pp = 0.0, s_pn = 0.0;
-        uint64_t n_ap = 0, n_an = 0, n_pp = 0, n_pn = 0;
+        // ── Ocupación latente (cloglog), probabilidad esperada de detección E[Y_{i,t}] = psi_{i,t} * p_{i,t} y frente homólogo ──
         const size_t rb = cal.year_begin[yi], re = cal.year_begin[yi + 1];
         float* psi = ctx.psi.data();
+        std::vector<double> distances;
+        distances.reserve(512);
+        std::vector<double> fallback_pos_distances;
+        fallback_pos_distances.reserve(512);
 
-        #pragma omp parallel for schedule(static) reduction(+:s_ap, s_an, s_pp, s_pn, n_ap, n_an, n_pp, n_pn)
         for (size_t r = rb; r < re; ++r) {
             const int32_t cid = cal.cell_id[r];
             const float D = ctx.dcnt[cid] ? ctx.dsum[cid] / static_cast<float>(ctx.dcnt[cid]) : 0.0f;
-
-            // cloglog(gamma) = a0 + a2 H_hab + a1 log(A_total);  logit(phi) = b0 + b1 log(1 + N) - b2 D
             const float a_total = total_arrivals(static_cast<float>(ctx.arr[cid]), static_cast<float>(ctx.arr_h[cid]), occ.w_h);
             const float gamma = compute_colonization_gamma(a_total, cal.hab[r], occ);
             const float phi = compute_persistence_phi(ctx.adult[cid], D, occ);
             const int32_t s = cal.slot[r];
-            // psi_t = (1 - psi_{t-1}) gamma + psi_{t-1} phi   (cada slot aparece una sola vez por año)
             const float psi_cur = update_dynamic_occupancy(psi[s], gamma, phi);
             psi[s] = psi_cur;
+            const float pm = marginal_observation_prob(psi_cur, cal.p_det[r]);
+            if (pm > kHomologousFrontProbThreshold) {
+                distances.push_back(static_cast<double>(cal.dist_seed_km[r]));
+            } else if (pm > 0.0f) {
+                fallback_pos_distances.push_back(static_cast<double>(cal.dist_seed_km[r]));
+            }
+        }
+        if (distances.empty() && !fallback_pos_distances.empty()) {
+            distances = std::move(fallback_pos_distances);
+        }
+        const double front_p95 = distances.empty() ? 5.0 : percentile95(distances);
+        sim_front_per_year.push_back(front_p95);
+        cummax_sim_front = std::max(cummax_sim_front, front_p95);
+        // Envolvente activa SIMULADA (misma regla que joro_evaluate): radio = base + frente simulado acumulado (M15)
+        const float env_radius = static_cast<float>(kEnvelopeBaseKm + cummax_sim_front);
 
+        // ── Brier estratificado (OpenMP) ──
+        double s_ap = 0.0, s_an = 0.0, s_pp = 0.0, s_pn = 0.0;
+        uint64_t n_ap = 0, n_an = 0, n_pp = 0, n_pn = 0;
+
+        #pragma omp parallel for schedule(static) reduction(+:s_ap, s_an, s_pp, s_pn, n_ap, n_an, n_pp, n_pn)
+        for (size_t r = rb; r < re; ++r) {
             uint8_t c = cal.cat[r];
             if (c == CAT_NONE) continue;
             if (c == CAT_ARR_NEG && cal.dist_seed_km[r] > env_radius) continue;   // ausencia lejana fuera de la envolvente
-            // P_hat(Y=1) = psi * p
+            const float psi_cur = psi[cal.slot[r]];
             const double pm = marginal_observation_prob(psi_cur, cal.p_det[r]);
             switch (c) {
                 case CAT_ARR_POS: s_ap += (1.0 - pm) * (1.0 - pm); ++n_ap; break;
@@ -567,11 +594,14 @@ std::vector<CalibrationObservation> load_calibration_dataset(const std::string& 
     const int c_zi = find_col({"z_imp"}), c_zb = find_col({"z_borde"}), c_zd = find_col({"z_dosel"});
     const int c_h = find_col({"pop_density_h"}), c_r = find_col({"road_density_r"});
     const int c_cpue = find_col({"cpue_joro"}), c_cum = find_col({"y_cumulative_obs"}), c_tau = find_col({"tau_invasion_age"});
-    if (c_cell < 0 || c_year < 0 || c_y < 0 || (c_eff_ex < 0 && c_eff < 0) || c_lon < 0 || c_lat < 0) {
+    if (c_eff_ex < 0) {
+        throw std::runtime_error("[Simulated Annealing] ERROR: falta la columna obligatoria 'effort_exogenous' en " +
+                                 csv_path + " (prohibido fallback circular a 'effort_araneae').");
+    }
+    if (c_cell < 0 || c_year < 0 || c_y < 0 || c_lon < 0 || c_lat < 0) {
         std::cerr << "[Simulated Annealing] ERROR: cabecera inesperada en " << csv_path << "\n";
         return dataset;
     }
-    const bool has_exogenous = c_eff_ex >= 0;
 
     while (std::getline(file, line)) {
         if (line.empty()) continue;
@@ -587,7 +617,7 @@ std::vector<CalibrationObservation> load_calibration_dataset(const std::string& 
         obs.y_detected = static_cast<uint8_t>(get(c_y, 0));
         obs.joro_count = static_cast<int32_t>(get(c_cnt, 0));
         obs.effort_araneae = static_cast<int32_t>(get(c_eff, 0));
-        obs.effort_exogenous = has_exogenous ? static_cast<int32_t>(get(c_eff_ex, 0)) : obs.effort_araneae;
+        obs.effort_exogenous = static_cast<int32_t>(get(c_eff_ex, 0));
         obs.centroid_lon = static_cast<float>(get(c_lon, 0));
         obs.centroid_lat = static_cast<float>(get(c_lat, 0));
         obs.z_imp = static_cast<float>(get(c_zi, 0));
@@ -602,8 +632,7 @@ std::vector<CalibrationObservation> load_calibration_dataset(const std::string& 
     }
 
     std::cout << "[Simulated Annealing] Dataset cargado en RAM: " << dataset.size() 
-              << " registros observacionales (2014-2019) | esfuerzo: "
-              << (has_exogenous ? "exógeno E^{-J} (sin circularidad)" : "effort_araneae heredado (circular)") << ".\n";
+              << " registros observacionales (2014-2019) | esfuerzo: exógeno E^{-J} (sin circularidad).\n";
     return dataset;
 }
 
@@ -625,13 +654,18 @@ SimulatedAnnealingReport run_multi_start_simulated_annealing(
     report.params = defs;
     report.n_chains = n_chains;
     report.iter_per_chain = iter_per_chain;
-    report.total_evaluations = n_chains * iter_per_chain;
+    report.n_proposals = n_chains * iter_per_chain;
+    report.n_initial = n_chains;
+    report.n_nominal = 1;
+    report.total_evaluations = report.n_proposals + report.n_initial + report.n_nominal;
     report.omp_max_threads = omp_get_max_threads();
 
     if (lpdm_engine == nullptr) throw std::invalid_argument("Se requiere un motor LPDM (GPU SYCL).");
     if (thermal_by_year.size() < static_cast<size_t>(kNYears)) {
         throw std::invalid_argument("Se requieren 6 grillas térmicas diarias (2014-2019).");
     }
+    // Reiniciar la telemetría acumulada del motor LPDM al iniciar cada modelo para que kernel_s <= wall_s
+    lpdm_engine->reset_telemetry();
     // La GPU es obligatoria en cada evaluación; solo se admite CPU de forma explícita para depuración.
     const char* allow_cpu = std::getenv("JORO_ALLOW_CPU_FALLBACK");
     const bool cpu_ok = allow_cpu != nullptr && std::string(allow_cpu) == "1";
@@ -650,7 +684,10 @@ SimulatedAnnealingReport run_multi_start_simulated_annealing(
     std::cout << "▶ Invocando Recocido Simulado Multi-inicio (Simulated Annealing)\n";
     std::cout << "  Cadenas independientes  : " << n_chains << " multi-start (ejecución SECUENCIAL)\n";
     std::cout << "  Iteraciones por cadena  : " << iter_per_chain << " iter\n";
-    std::cout << "  Total evaluaciones 2014-2019 : " << report.total_evaluations << "\n";
+    std::cout << "  Total evaluaciones 2014-2019 : " << report.total_evaluations
+              << " (n_proposals = " << report.n_proposals
+              << ", n_initial = " << report.n_initial
+              << ", n_nominal = " << report.n_nominal << ")\n";
     std::cout << "  Espacio de parámetros   : " << n_params << " dimensiones dominantes (beta_s discreto {1,2,3}) | modelo K_i = " << abm::carrying_model_name(model) << "\n";
     std::cout << "  Temperatura inicial T0  : " << initial_temp << "\n";
     std::cout << "  Tolerancia Delta (Theta_comp) : " << delta_threshold << "\n";
@@ -718,6 +755,7 @@ SimulatedAnnealingReport run_multi_start_simulated_annealing(
     for (size_t i = 0; i < grid_cells.size(); ++i) {
         ctx.epi_dist_km[i] = static_cast<float>(cal.seed.dist_km(grid_cells[i].centroid_lat, grid_cells[i].centroid_lon));
     }
+    const ChainTelemetry tel_at_model_start = snapshot(ctx);
 
     // 1. Escalas de referencia en el punto nominal (theta_default); sirve además de calentamiento de la GPU
     std::vector<float> theta_nominal(n_params);
@@ -867,7 +905,7 @@ SimulatedAnnealingReport run_multi_start_simulated_annealing(
     }
 
     report.total_runtime_s = elapsed_s(t0);
-    report.telemetry_total = snapshot(ctx);
+    report.telemetry_total = snapshot(ctx) - tel_at_model_start;
 
     // 3. Mejor solución global (MAP / J_min)
     double global_min = 1e6;
@@ -933,11 +971,9 @@ SimulatedAnnealingReport run_multi_start_simulated_annealing(
             std::vector<float> vals;
             vals.reserve(report.compatible_ensemble.size());
             for (const auto& mem : report.compatible_ensemble) vals.push_back(mem.theta[p_idx]);
-            std::sort(vals.begin(), vals.end());
-            const size_t n = vals.size();
-            report.p5_theta[p_idx] = vals[static_cast<size_t>(0.05 * (n - 1))];
-            report.median_theta[p_idx] = vals[static_cast<size_t>(0.50 * (n - 1))];
-            report.p95_theta[p_idx] = vals[static_cast<size_t>(0.95 * (n - 1))];
+            report.p5_theta[p_idx] = percentile_linear_f(vals, 0.05);
+            report.median_theta[p_idx] = percentile_linear_f(vals, 0.50);
+            report.p95_theta[p_idx] = percentile_linear_f(vals, 0.95);
         }
     }
 

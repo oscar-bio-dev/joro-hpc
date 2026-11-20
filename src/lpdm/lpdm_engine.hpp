@@ -64,8 +64,11 @@ public:
         float dt_seconds,
         int total_steps) = 0;
 
-    /// Telemetría acumulada desde la construcción (por defecto vacía)
+    /// Telemetría acumulada desde la construcción o el último reset_telemetry() (por defecto vacía)
     [[nodiscard]] virtual EngineTelemetry telemetry() const { return {}; }
+
+    /// Reinicia los contadores de telemetría acumulada del motor LPDM
+    virtual void reset_telemetry() {}
 
     /// True si run_dispersion se ejecuta en un dispositivo GPU (SYCL)
     [[nodiscard]] virtual bool is_gpu_offload_active() const noexcept { return false; }

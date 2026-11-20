@@ -17,13 +17,10 @@ max_evaluations = 5000
 timeout_seconds = 300
 
 [abm_priors]
-# Fecundidad: número de huevos por saco (Tabla 8.3 de JORO-HPC_Research_Proposal.tex: 400–500 huevos/saco)
+# Fecundidad: número de huevos por saco único (semelparidad estricta, Suzuki & Asano 2022; Tabla 8.3: 400–500 huevos/saco)
 fecundity_min = 400.0
 fecundity_max = 500.0
 fecundity_default = 450.0
-
-# Producción anual por hembra (considerando 1 a 3 sacos anuales en condiciones óptimas)
-fecundity_annual_max = 1500.0
 
 # Coeficiente Q10 de aceleración metabólica por estadio (Tabla 8.3: 2.0–3.0)
 q10_min = 2.0
@@ -54,11 +51,6 @@ q_viab_default = 0.65
 q_balloon_min = 0.10
 q_balloon_max = 0.60
 q_balloon_default = 0.35
-
-# Parámetro de dispersión de la distribución Binomial Negativa (kappa_B)
-kappa_b_min = 0.5
-kappa_b_max = 5.0
-kappa_b_default = 1.8
 
 [lpdm_priors]
 # Compuerta biomecánica de despegue (ballooning, M3): una cría solo inicia vuelo distante si el viento a 10 m

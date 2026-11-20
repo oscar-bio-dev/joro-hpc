@@ -18,7 +18,6 @@ struct DemographicParameters {
     int   beta_damage = 2;         ///< Exponente de estrés térmico (1, 2 o 3)
     float q_viab = 0.65f;          ///< Viabilidad de ootecas (Tabla 8.3: 0.20-0.90)
     float q_balloon = 0.35f;       ///< Fracción de baloneo aéreo (Tabla 8.3: 0.10-0.60)
-    float kappa_b = 1.8f;          ///< Dispersión NegBin
 
     // Capacidad de carga K_i (Sección 8.4)
     float k0 = 5000.0f;            ///< Capacidad de carga base en hábitat promedio

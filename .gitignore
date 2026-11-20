@@ -95,7 +95,8 @@ Makefile
 # ── Pipeline local de ingesta, telemetría y auditorías privadas ─────────────
 local_pipeline/
 docs/internal_audits/
-docs/reports/0[5-9]_*.md
+docs/reports/
+reports/
 tmp/
 docs/tmp/
 *.log

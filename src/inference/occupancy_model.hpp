@@ -33,10 +33,14 @@ struct OccupancyParameters {
     float beta3_road = 0.30f;
 
     // Observación no estacionaria f_est(i,t) = lambda_M log(1 + M_t/M_2019) - kappa_tau log(1 + tau_{i,t}) (Ec. 24-25).
-    // Fijados por regresión del proceso de observación + anclas externas (§10.2: λ≈1.9 en Atlanta y fracción de registros
-    // en celdas establecidas); se pueden sobrescribir con JORO_LAMBDA_M / JORO_KAPPA_TAU. lambda_M = kappa_tau = 0 anula f_est.
-    float lambda_M = 1.15f;
-    float kappa_tau = 0.25f;
+    // M_t es el índice exógeno de actividad de plataforma (registros GBIF de Araneae no-Joro), NO atención mediática.
+    // Valores por defecto estimados estrictamente en 2014-2019 (cero fuga temporal hacia 2020-2024; ver
+    // local_pipeline/ingestion/fit_observation_nonstationarity.py y observation_fit_2014_2019.json):
+    //   lambda_M  = 1.1533 ± 0.1762 (IC 95 % [0.8079, 1.4987], p < 1e-10; o 1.1464 ± 0.1763 si kappa_tau = 0)
+    //   kappa_tau = 0.0797 ± 0.4791 (IC 95 % [-0.8594, +1.0187], p = 0.8679; estadísticamente no identificable en 2014-2019)
+    // Se pueden sobrescribir con JORO_LAMBDA_M / JORO_KAPPA_TAU. lambda_M = kappa_tau = 0 anula f_est.
+    float lambda_M = 1.1533f;
+    float kappa_tau = 0.0797f;
 
     // Kernel mixto humano (Sección 7, Ec. atot): A_total = (1 - p_h) A_LPDM + p_h A_hum.  p_h ≡ w_h (prior log-uniforme
     // [1e-4, 1e-1]); lambda_h es la escala de la gravedad antropogénica por corredores viales. p_h = 0 => modelo atmosférico puro.
@@ -132,7 +136,7 @@ struct AttentionIndex {
     return sigmoid(logit_val);
 }
 
-/// Término no estacionario de detección (Ec. 25): notoriedad mediática M_t y habituación local tau_{i,t} [años]
+/// Término no estacionario de detección (Ec. 25): índice de actividad de plataforma M_t (Araneae no-Joro) y habituación local tau_{i,t} [años]
 [[nodiscard]] inline float compute_f_est(float m_ratio_2019, float tau_invasion_age, const OccupancyParameters& p) noexcept
 {
     return p.lambda_M * std::log1p(std::max(0.0f, m_ratio_2019)) - p.kappa_tau * std::log1p(std::max(0.0f, tau_invasion_age));

@@ -9,7 +9,7 @@ Covariables:
   - Tmean estival media (ERA5 daily t2m)
   - z_imp, z_borde, z_dosel (NLCD)
   - pop_density_h, road_density_r (Censo / TIGER)
-  - log1p(effort_araneae) (Esfuerzo TGB)
+  - log1p(effort_exogenous) (Esfuerzo TGB exógeno Araneae no-Joro, sin circularidad)
 """
 
 import json
@@ -61,9 +61,15 @@ def map_thermal(df, years):
         w_arr[mask] = w_grid[lat_idx[mask], lon_idx[mask]]
         s_arr[mask] = s_grid[lat_idx[mask], lon_idx[mask]]
 
+    if "effort_exogenous" not in df.columns:
+        raise RuntimeError(
+            "Falta la columna obligatoria 'effort_exogenous' en el CSV (prohibido fallback circular a 'effort_araneae')."
+        )
     df["w_tmin"] = w_arr
     df["s_tmean"] = s_arr
-    df["log_effort"] = np.log1p(df["effort_araneae"].values.astype(np.float32))
+    df["log_effort"] = np.log1p(
+        np.maximum(0.0, df["effort_exogenous"].values.astype(np.float32))
+    )
     return df
 
 
@@ -128,6 +134,7 @@ def main():
             "centroid_lat",
             "centroid_lon",
             "y_joro_detected",
+            "effort_exogenous",
             "effort_araneae",
             "ecoregion_block",
         ]

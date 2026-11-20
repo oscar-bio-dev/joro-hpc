@@ -101,7 +101,10 @@ struct CalibrationStratification {
 struct SimulatedAnnealingReport {
     int n_chains = 5;
     int iter_per_chain = 400;
-    int total_evaluations = 2000;
+    int n_proposals = 2000;
+    int n_initial = 5;
+    int n_nominal = 1;
+    int total_evaluations = 2006;
     double total_runtime_s = 0.0;
     abm::CarryingModel model = abm::CarryingModel::M1;   ///< Modelo de K_i evaluado
     std::vector<CalibrationParamDef> params;             ///< Definición de theta para este modelo

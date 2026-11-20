@@ -517,7 +517,9 @@ static void write_calibration_summary_json(const std::string& path,
     for (size_t i = 0; i < r.params.size(); ++i)
         f << (i ? "," : "") << "{\"name\":\"" << r.params[i].name << "\",\"min\":" << r.params[i].min_val
           << ",\"max\":" << r.params[i].max_val << "}";
-    f << "],\n  \"total_evaluations\": " << r.total_evaluations << ",\n  \"runtime_s\": " << r.total_runtime_s
+    f << "],\n  \"n_proposals\": " << r.n_proposals << ",\n  \"n_initial\": " << r.n_initial
+      << ",\n  \"n_nominal\": " << r.n_nominal << ",\n  \"total_evaluations\": " << r.total_evaluations
+      << ",\n  \"runtime_s\": " << r.total_runtime_s
       << ",\n  \"global_min_cost\": " << r.global_min_cost << ",\n  \"atmosphere_slots\": " << r.atmosphere_slots
       << ",\n  \"omp_threads\": " << r.omp_max_threads << ",\n  \"device\": \"" << r.device_description << "\",\n";
     f << "  \"map_theta\": "; vec(r.map_theta); f << ",\n  \"median_theta\": "; vec(r.median_theta);
@@ -763,9 +765,10 @@ int main(int argc, char* argv[]) {
             // JORO_BENCH_THETA=map: usa el MAP congelado de M1 (población y colonización realistas) en vez del punto nominal
             if (joro::env_or("JORO_BENCH_THETA", "nominal") == "map" && theta_nominal.size() == 9) {
                 const auto loaded_map = load_m1_map_theta_if_available();
-                theta_nominal = (loaded_map.size() == 9)
-                    ? loaded_map
-                    : std::vector<float>{-2.1747344f, 0.028961826f, 2.0f, 9203.6211f, 0.79627186f, 0.4722499f, 0.35181648f, -1.3290558f, 1.7328026f};
+                if (loaded_map.size() != 9) {
+                    throw std::runtime_error("JORO_BENCH_THETA=map requiere un calibration_summary_M1.json válido con map_theta de 9 parámetros.");
+                }
+                theta_nominal = loaded_map;
             }
             const int n_rep = std::max(1, joro::env_int_or("JORO_BENCH_REPS", 3));
             (void)evaluator.evaluate(theta_nominal);                      // calentamiento (JIT SYCL, cachés, páginas)
@@ -810,6 +813,7 @@ int main(int argc, char* argv[]) {
         for (size_t model_pos = 0; model_pos < models.size(); ++model_pos) {
         const joro::abm::CarryingModel cal_model = models[model_pos];
         const bool main_model = (model_pos == 0);
+        lpdm_gpu->reset_telemetry();
         joro::inference::SimulatedAnnealingReport sa_report;
         int sa_chains = 5, sa_iters = 400; // Configuración oficial: 5 x 400 = 2,000 evaluaciones
         if (const char* e = std::getenv("JORO_SA_CHAINS")) sa_chains = std::max(1, std::atoi(e));
